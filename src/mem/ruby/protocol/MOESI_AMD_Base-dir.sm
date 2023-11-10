@@ -1061,7 +1061,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     if (tbe.wtData || tbe.atomicData || tbe.Dirty == false) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
-      if(!tbe.responded) { // wouldn't change functionally, just saves a renundant overwrite
+      if(!tbe.responded) { 
+        /* it is important to only do this when the requesting-core hasn't
+         * already been responded to so as not to repeat the operation twice
+         * which in some ATOMIC_RETURN cases could duplicate a log entry
+         * leading to problems when processing the response packets at the GPUColaescer
+         */
         if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
           tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask);
         }
@@ -1142,6 +1147,14 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     if(tbe.readyToResp && !tbe.responded) {
       if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
         DPRINTF(RubySlicc, "Early: Responding to RdBlkM/WT/Atomic\n", tbe.TBEState);
+        /* this is something that would otherwise have been done before
+         * responding to the core, as part of writing back to memory
+         * since we are skipping that part now, we need to do that here
+         */
+        if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
+          tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask);
+        }
+
         if (tbe.wtData) {
           enqueue(triggerQueue_out, TriggerMsg, 1) {
             out_msg.addr := address;
