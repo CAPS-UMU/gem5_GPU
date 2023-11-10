@@ -1140,73 +1140,50 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(edc_earlyDataToCore, "edc", desc="early data to core") {
     if(tbe.readyToResp && !tbe.responded) {
-      if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
-        // even though exclusivity is determined for the response, it's never used by GPU
-        // it's only used by CPU -- why?? TODO
-        // GPU, due to the memory model that allows them to assumed shared/stale state
-        // unless explicitly synchronized
-        DPRINTF(RubySlicc, "Early: Responding to B_PMm\n");
-        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-          out_msg.addr := address;
-          out_msg.Type := CoherenceResponseType:NBSysResp;
-          if (tbe.L3Hit) {
-            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
-          } else {
-            out_msg.Sender := machineID;
+      if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
+        DPRINTF(RubySlicc, "Early: Responding to RdBlkM/WT/Atomic\n", tbe.TBEState);
+        if (tbe.wtData) {
+          enqueue(triggerQueue_out, TriggerMsg, 1) {
+            out_msg.addr := address;
+            out_msg.Type := TriggerType:UnblockWriteThrough;
           }
-          out_msg.Destination.add(tbe.OriginalRequestor);
-          out_msg.DataBlk := tbe.DataBlk;
-          out_msg.MessageSize := MessageSizeType:Response_Data;
-          out_msg.Dirty := tbe.Dirty;
-          // Doesn't matter for GPU !!!TODO check!!!
-          if (tbe.Cached) {
-            out_msg.State := CoherenceState:Shared; // safer than exclusive
-          } else {
-            out_msg.State := CoherenceState:Exclusive;
+        } else {
+          enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+            out_msg.addr := address;
+            out_msg.Type := CoherenceResponseType:NBSysResp;
+            if (tbe.L3Hit) {
+              out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+            } else {
+              out_msg.Sender := machineID; // TODO memory (L3 miss)
+            }
+            out_msg.Destination.add(tbe.OriginalRequestor);
+            out_msg.DataBlk := tbe.DataBlk;
+            out_msg.MessageSize := MessageSizeType:Response_Data;
+            out_msg.Dirty := tbe.Dirty;
+            out_msg.State := CoherenceState:Modified;
+            out_msg.CtoD := false;
+            out_msg.InitialRequestTime := tbe.InitialRequestTime;
+            out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+            out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+            out_msg.OriginalResponder := tbe.LastSender;
+            if(tbe.atomicData){
+              out_msg.WTRequestor := tbe.WTRequestor;
+            }
+            out_msg.L3Hit := tbe.L3Hit;
+            DPRINTF(RubySlicc, "%s\n", out_msg);
           }
-          out_msg.InitialRequestTime := tbe.InitialRequestTime;
-          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
-          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-          out_msg.OriginalResponder := tbe.LastSender;
-          out_msg.L3Hit := tbe.L3Hit;
-          DPRINTF(RubySlicc, "%s\n", out_msg);
+          if (tbe.atomicData) {
+            enqueue(triggerQueue_out, TriggerMsg, 1) {
+              out_msg.addr := address;
+              out_msg.Type := TriggerType:UnblockWriteThrough;
+            }
+          }
         }
+      }
       tbe.responded := true;
     }
   }
 
-
-//  action(y_writeProbeDataToTBE, "y", desc="write Probe Data to TBE") {                             // called only whenever there is a probe response from CPU/GPU
-//    peek(responseNetwork_in, ResponseMsg) {                                                        // response network
-//      if (in_msg.Dirty) {                                                                          // if the probe response is dirty, need to update TBE
-//        if (tbe.Dirty) {                                                                          //     in case the probe was initiated due to GPU that had WT data, or DMA that was writing
-//          if (tbe.wtData) {                                                                          //     in case the probe was initiated due to GPU that had WT data, or DMA that was writing
-//                                                                                                   //         (because the only other case is RdBlkM from CPU -- which already has data from mem)
-//            DataBlock tmp := in_msg.DataBlk;                                                         //        
-//            tmp.copyPartial(tbe.DataBlk,tbe.writeMask);                                              //     
-//            tbe.DataBlk := tmp;                                                                      //     only write the WT data and retain the in_msg data in the remaining words 
-//                                                                                                     //         (the reason this is valid is that the consistency model allows for this, right? 
-//                                                                                                     //         Otherwise, this would be an unreachable situation)
-//            tbe.writeMask.fillMask();                                                                //     mark the entire line as valid for writing back (should be safe)
-//            // TODO trigger probeAckComplete
-//          } else {                                                                    //     this is never reached on the first dirty probe-response; only 2nd or later dirty probe-responses.
-//            if(tbe.atomicData == false && tbe.wtData == false) {                                     //         if this is not a DMA/GPU-related transaction
-//              DPRINTF(RubySlicc, "Got double data for %s from %s\n", address, in_msg.Sender);        //
-//              assert(tbe.DataBlk == in_msg.DataBlk);  // in case of double data                      //         assert the 2nd or later dirty data is the same as in the TBE 
-//            }                                                                                        //
-//          }
-//        } else {                                                                                   //     the first dirty probe-response reaches this point
-//          tbe.DataBlk := in_msg.DataBlk;                                                           //         this is safe since the TBE is currently clean
-//          tbe.Dirty := in_msg.Dirty;                                                               //         this ensures that next time we enter tbe.Dirty condition
-//          tbe.LastSender := in_msg.Sender;                                                         //         records the original responder (not sure why)
-//        }                                                                                          //
-//      }                                                                                            //
-//      if (in_msg.Hit) {                                                                            // otherwise, if it had hit in CPU/GPU,
-//        tbe.Cached := true;                                                                        //     record this so the next response if to a CPU can show shared/exclusive grant
-//      }
-//    }
-//  }
-//
   action(mwc_markSinkWriteCancel, "mwc", desc="Mark to sink impending VicDirty") {
     peek(responseNetwork_in, ResponseMsg) {
       getDirectoryEntry(address).VicDirtyIgnore.add(in_msg.Sender);
@@ -1486,7 +1463,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     z_stall;
   }
 
-  transition({BM_Pm, BM_PM}, UnblockWriteThrough) {
+  transition({BM_Pm, BM_PM, BM_M}, UnblockWriteThrough) {
     z_stall;
   }
 
