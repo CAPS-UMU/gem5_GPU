@@ -1179,6 +1179,53 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             }
           }
         }
+      } else if (tbe.TBEState == State:BS_PM || tbe.TBEState == State:BS_Pm) {
+        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+          out_msg.addr := address;
+          out_msg.Type := CoherenceResponseType:NBSysResp;
+          if (tbe.L3Hit) {
+            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+          } else {
+            out_msg.Sender := machineID;
+          }
+          out_msg.Destination.add(tbe.OriginalRequestor);
+          out_msg.DataBlk := tbe.DataBlk;
+          out_msg.MessageSize := MessageSizeType:Response_Data;
+          out_msg.Dirty := false;
+          out_msg.State := CoherenceState:Shared;
+          out_msg.InitialRequestTime := tbe.InitialRequestTime;
+          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+          out_msg.OriginalResponder := tbe.LastSender;
+          out_msg.L3Hit := tbe.L3Hit;
+          DPRINTF(RubySlicc, "%s\n", out_msg);
+        }
+      } else if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
+        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+          out_msg.addr := address;
+          out_msg.Type := CoherenceResponseType:NBSysResp;
+          if (tbe.L3Hit) {
+            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+          } else {
+            out_msg.Sender := machineID;
+          }
+          out_msg.Destination.add(tbe.OriginalRequestor);
+          out_msg.DataBlk := tbe.DataBlk;
+          out_msg.MessageSize := MessageSizeType:Response_Data;
+          out_msg.Dirty := tbe.Dirty;
+          // this is ignored by GPU
+          if (tbe.Cached) {
+            out_msg.State := CoherenceState:Shared;
+          } else {
+            out_msg.State := CoherenceState:Exclusive;
+          }
+          out_msg.InitialRequestTime := tbe.InitialRequestTime;
+          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+          out_msg.OriginalResponder := tbe.LastSender;
+          out_msg.L3Hit := tbe.L3Hit;
+          DPRINTF(RubySlicc, "%s\n", out_msg);
+        }
       }
       tbe.responded := true;
     }
@@ -1477,7 +1524,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   // there is now a new possibility of core unblocking before all probes/memory is read
-  transition({BM_M, BM_PM, BM_Pm, BS_M, BS_PM, BS_Pm, B_M, B_PM, B_Pm}, CoreUnblock) {
+  transition({BM_M, BM_PM, BM_Pm, BS_M, BS_PM, BS_Pm}, CoreUnblock) {
     z_stall;
   }
 
