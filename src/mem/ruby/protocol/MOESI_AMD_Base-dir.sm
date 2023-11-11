@@ -501,61 +501,61 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(m_sendResponseM, "m", desc="send Modified response") {
     if(!tbe.responded) {
-	    if (tbe.wtData) {
-	      enqueue(triggerQueue_out, TriggerMsg, 1) {
-		out_msg.addr := address;
-		out_msg.Type := TriggerType:UnblockWriteThrough;
-	      }
-	    }else{
-	      enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-		out_msg.addr := address;
-		out_msg.Type := CoherenceResponseType:NBSysResp;
-		if (tbe.L3Hit) {
-		  out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
-		} else {
-		  out_msg.Sender := machineID;
-		}
-		out_msg.Destination.add(tbe.OriginalRequestor);
-		out_msg.DataBlk := tbe.DataBlk;
-		out_msg.MessageSize := MessageSizeType:Response_Data;
-		out_msg.Dirty := tbe.Dirty;
-		out_msg.State := CoherenceState:Modified;
-		out_msg.CtoD := false;
-		out_msg.InitialRequestTime := tbe.InitialRequestTime;
-		out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
-		out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-		out_msg.OriginalResponder := tbe.LastSender;
-		if(tbe.atomicData){
-		  out_msg.WTRequestor := tbe.WTRequestor;
-		}
-		out_msg.L3Hit := tbe.L3Hit;
-		DPRINTF(RubySlicc, "%s\n", out_msg);
-	      }
-	      if (tbe.atomicData) {
-		enqueue(triggerQueue_out, TriggerMsg, 1) {
-		  out_msg.addr := address;
-		  out_msg.Type := TriggerType:UnblockWriteThrough;
-		}
-	      }
-	    }
+      if (tbe.wtData) {
+        enqueue(triggerQueue_out, TriggerMsg, 1) {
+          out_msg.addr := address;
+          out_msg.Type := TriggerType:UnblockWriteThrough;
+        }
+      } else {
+        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+          out_msg.addr := address;
+          out_msg.Type := CoherenceResponseType:NBSysResp;
+          if (tbe.L3Hit) {
+            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+          } else {
+            out_msg.Sender := machineID;
+          }
+          out_msg.Destination.add(tbe.OriginalRequestor);
+          out_msg.DataBlk := tbe.DataBlk;
+          out_msg.MessageSize := MessageSizeType:Response_Data;
+          out_msg.Dirty := tbe.Dirty;
+          out_msg.State := CoherenceState:Modified;
+          out_msg.CtoD := false;
+          out_msg.InitialRequestTime := tbe.InitialRequestTime;
+          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+          out_msg.OriginalResponder := tbe.LastSender;
+          if(tbe.atomicData){
+            out_msg.WTRequestor := tbe.WTRequestor;
+          }
+          out_msg.L3Hit := tbe.L3Hit;
+          DPRINTF(RubySlicc, "%s\n", out_msg);
+        }
+        if (tbe.atomicData) {
+          enqueue(triggerQueue_out, TriggerMsg, 1) {
+            out_msg.addr := address;
+            out_msg.Type := TriggerType:UnblockWriteThrough;
+          }
+        }
+      }
     }
   }
 
   action(c_sendResponseCtoD, "c", desc="send CtoD Ack") {
-      enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-        out_msg.addr := address;
-        out_msg.Type := CoherenceResponseType:NBSysResp;
-        out_msg.Sender := machineID;
-        out_msg.Destination.add(tbe.OriginalRequestor);
-        out_msg.MessageSize := MessageSizeType:Response_Control;
-        out_msg.Dirty := false;
-        out_msg.State := CoherenceState:Modified;
-        out_msg.CtoD := true;
-        out_msg.InitialRequestTime := tbe.InitialRequestTime;
-        out_msg.ForwardRequestTime := curCycle();
-        out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-        DPRINTF(RubySlicc, "%s\n", out_msg);
-      }
+    enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:NBSysResp;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(tbe.OriginalRequestor);
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+      out_msg.Dirty := false;
+      out_msg.State := CoherenceState:Modified;
+      out_msg.CtoD := true;
+      out_msg.InitialRequestTime := tbe.InitialRequestTime;
+      out_msg.ForwardRequestTime := curCycle();
+      out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+      DPRINTF(RubySlicc, "%s\n", out_msg);
+    }
   }
 
   action(w_sendResponseWBAck, "w", desc="send WB Ack") {
@@ -1147,7 +1147,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     if(tbe.readyToResp && !tbe.responded) {
       if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
         DPRINTF(RubySlicc, "Early: Responding to RdBlkM/WT/Atomic\n", tbe.TBEState);
-        /* this is something that would otherwise have been done before
+        /* this would otherwise have been done before
          * responding to the core, as part of writing back to memory
          * since we are skipping that part now, we need to do that here
          */
@@ -1322,6 +1322,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     triggerQueue_in.dequeue(clockEdge());
   }
 
+  action(rt_recycleTriggerQueue, "rt", desc="recycle trigger queue") {
+    triggerQueue_in.recycle(clockEdge(), cyclesToTicks(recycle_latency));
+  }
+
   action(ptl_popTriggerQueue, "ptl", desc="pop L3 trigger queue") {
     L3TriggerQueue_in.dequeue(clockEdge());
   }
@@ -1476,10 +1480,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     z_stall;
   }
 
+  /*  Sometimes, there is the possibility of getting a UnblockWriteThrough before ProbeAcksComplete
+   *  because now we might be early-responding. And so, for those cases, when we encounter a premature
+   *  UnblockWriteThrough, we can't just stall -- we'd need to recycle it. So the ProbeAcksComplete
+   *  gets visibility.
+   */
   transition({BM_Pm, BM_PM, BM_M}, UnblockWriteThrough) {
-    z_stall;
+    rt_recycleTriggerQueue;
   }
 
+  // there is now a new possibility of core unblocking before all probes/memory is read
   transition({BM_M, BM_PM, BM_Pm}, CoreUnblock) {
     z_stall;
   }
