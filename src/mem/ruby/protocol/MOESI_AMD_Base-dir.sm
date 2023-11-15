@@ -251,6 +251,33 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     getDirectoryEntry(addr).changePermission(Directory_State_to_permission(state));
   }
 
+  void recordRequestType(RequestType request_type, Addr addr) {
+    if (request_type == RequestType:L3DataArrayRead) {
+        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayRead, addr);
+    } else if (request_type == RequestType:L3DataArrayWrite) {
+        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayWrite, addr);
+    } else if (request_type == RequestType:L3TagArrayRead) {
+        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayRead, addr);
+    } else if (request_type == RequestType:L3TagArrayWrite) {
+        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayWrite, addr);
+    }
+  }
+
+  bool checkResourceAvailable(RequestType request_type, Addr addr) {
+    if (request_type == RequestType:L3DataArrayRead) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:DataArray, addr);
+    } else if (request_type == RequestType:L3DataArrayWrite) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:DataArray, addr);
+    } else if (request_type == RequestType:L3TagArrayRead) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else if (request_type == RequestType:L3TagArrayWrite) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else {
+      error("Invalid RequestType type in checkResourceAvailable");
+      return true;
+    }
+  }
+
   // ** OUT_PORTS **
   out_port(dmaResponseQueue_out, DMAResponseMsg, responseToDMA);
 
@@ -602,7 +629,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
         tbe.L3Hit := true;
         tbe.MemData := true;
-        L3CacheMemory.deallocate(address); //TODO why?
+        L3CacheMemory.deallocate(address);
       } else {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
           out_msg.addr := address;
@@ -929,16 +956,33 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(d_writeDataToMemory, "d", desc="Write data to memory") {
     peek(responseNetwork_in, ResponseMsg) {
-      enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-        out_msg.addr := address;
-        out_msg.Type := MemoryRequestType:MEMORY_WB;
-        out_msg.Sender := machineID;
-        out_msg.MessageSize := MessageSizeType:Writeback_Data;
-        out_msg.DataBlk := in_msg.DataBlk;
-      }
-      if (tbe.Dirty == false) {
-          // have to update the TBE, too, because of how this
-          // directory deals with functional writes
+      // here too memory write can be saved if not dirty
+      if (in_msg.Dirty) {
+        enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+          out_msg.addr := address;
+          out_msg.Type := MemoryRequestType:MEMORY_WB;
+          out_msg.Sender := machineID;
+          out_msg.MessageSize := MessageSizeType:Writeback_Data;
+          out_msg.DataBlk := in_msg.DataBlk;
+        }
+        // tbe.Dirty is gratuitous here, but functional writes may apply
+        tbe.Dirty := false;
+        // PS we're not writing back in case of !in_msg.Dirty,
+        // Since the original FSM does not wait for the WBAck, 
+        // we don't need to either (TODO safe?)
+        // if needed, use the trigger queue as so:
+        //enqueue(triggerQueue_out, TriggerMsg, 1) {
+        //  out_msg.addr := address;
+        //  out_msg.Type := TriggerType:WriteDone; 
+        //  // this is different from the actual usage of WriteDone
+        //}
+
+      } else {
+        assert (tbe.dirty == false); //default unchanged
+        // we are skipping writing to the memory if victim is clean
+
+        // have to update the TBE, too, because of how this
+        // directory deals with functional writes
         tbe.DataBlk := in_msg.DataBlk;
       }
     }
@@ -1007,6 +1051,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.isSLCSet := in_msg.isSLCSet;
       }
       tbe.Dirty := false;
+      // in case of vicClean/vicDirty, there is no info on Dirty
+      // it will be updated when the victimized data arrives on a different n/w
       if (in_msg.Type == CoherenceRequestType:WriteThrough) {
         tbe.DataBlk.copyPartial(in_msg.DataBlk,in_msg.writeMask);
         tbe.Dirty := true;
@@ -1242,39 +1288,47 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(al_allocateL3Block, "al", desc="allocate the L3 block on WB") {
-    /* This is for when a victim block is being processed */
-    peek(responseNetwork_in, ResponseMsg) {
-      if (L3CacheMemory.isTagPresent(address)) {
-        CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
-        APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
-        entry.DataBlk := in_msg.DataBlk;
-        entry.LastSender := in_msg.Sender;
-        assert(is_valid(tbe));
-        //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
-        //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
-        //A TBE entry is not deallocated until a request is fully serviced and profiled.
-        tbe.L3Hit := true;
-      } else {
-        if (L3CacheMemory.cacheAvail(address) == false) {
-          Addr victim := L3CacheMemory.cacheProbe(address);
-          CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
-                                                 L3CacheMemory.lookup(victim));
-          enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-            out_msg.addr := victim;
-            out_msg.Type := MemoryRequestType:MEMORY_WB;
-            out_msg.Sender := machineID;
-            out_msg.MessageSize := MessageSizeType:Writeback_Data;
-            out_msg.DataBlk := victim_entry.DataBlk;
+    // this is for when a victim block is being processed
+    // we have already written to memory if in_msg.Dirty
+    // rewrite L3 iff in_msg.Dirty -- best case, this saves a memory read
+    // worst case, this may need to be evicted on a critical path
+    if (in_msg.Dirty) {
+      peek(responseNetwork_in, ResponseMsg) {
+        if (L3CacheMemory.isTagPresent(address)) {
+          CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
+          APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
+          entry.DataBlk := in_msg.DataBlk;
+          entry.LastSender := in_msg.Sender;
+          assert(is_valid(tbe));
+          //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
+          //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
+          //A TBE entry is not deallocated until a request is fully serviced and profiled.
+          tbe.L3Hit := true;
+        } else {
+          if (L3CacheMemory.cacheAvail(address) == false) {
+            Addr victim := L3CacheMemory.cacheProbe(address);
+            CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
+                                                   L3CacheMemory.lookup(victim));
+            enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+              out_msg.addr := victim;
+              out_msg.Type := MemoryRequestType:MEMORY_WB;
+              out_msg.Sender := machineID;
+              out_msg.MessageSize := MessageSizeType:Writeback_Data;
+              out_msg.DataBlk := victim_entry.DataBlk;
+            }
+            L3CacheMemory.deallocate(victim);
           }
-          L3CacheMemory.deallocate(victim);
-        }
-        assert(L3CacheMemory.cacheAvail(address));
-        CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.allocate(address, new CacheEntry));
-        APPEND_TRANSITION_COMMENT(" al wrote data to L3 ");
-        entry.DataBlk := in_msg.DataBlk;
+          assert(L3CacheMemory.cacheAvail(address));
+          CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.allocate(address, new CacheEntry));
+          APPEND_TRANSITION_COMMENT(" al wrote data to L3 ");
+          entry.DataBlk := in_msg.DataBlk;
 
-        entry.LastSender := in_msg.Sender;
-      }
+          entry.LastSender := in_msg.Sender;
+        }
+      } // else do not allocate L3 block
+        // best case: the original L3 from which the victim was originally sourced
+        //            has not been evicted, so a reallocation is redundant
+        // worst case: functionally correct, but a missed free caching opportunity
     }
   }
 
