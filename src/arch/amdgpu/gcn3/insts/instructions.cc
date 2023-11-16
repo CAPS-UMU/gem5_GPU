@@ -30946,7 +30946,7 @@ namespace Gcn3ISA
     void
     Inst_DS__DS_ADD_U32::execute(GPUDynInstPtr gpuDynInst)
     {
-        wavefront *wf = gpuDynInst->wavefront();
+        Wavefront *wf = gpuDynInst->wavefront();
 
         if (gpuDynInst->exec_mask.none()) {
             wf->decLGKMInstsIssued();
