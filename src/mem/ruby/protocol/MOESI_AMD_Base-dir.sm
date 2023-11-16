@@ -146,6 +146,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   structure(CacheEntry, desc="...", interface="AbstractCacheEntry") {
     DataBlock DataBlk,          desc="data for the block";
     MachineID LastSender,       desc="Mach which this block came from";
+    bool Dirty,                 desc="dirty bit to alleviate excessive clean-victim writebacks";
   }
 
   structure(TBE, desc="...") {
@@ -463,7 +464,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         out_msg.Destination.add(tbe.OriginalRequestor);
         out_msg.DataBlk := tbe.DataBlk;
         out_msg.MessageSize := MessageSizeType:Response_Data;
-        out_msg.Dirty := false;
+        out_msg.Dirty := false; //ensured by the probe-type (downgrade)
         out_msg.State := CoherenceState:Shared;
         out_msg.InitialRequestTime := tbe.InitialRequestTime;
         out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
@@ -491,6 +492,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         out_msg.MessageSize := MessageSizeType:Response_Data;
         out_msg.Dirty := tbe.Dirty;
         // this is ignored by GPU
+        // this is also dependant on how many probe acknowledgements intimate hit at probe dest
         if (tbe.Cached) {
           out_msg.State := CoherenceState:Shared;
         } else {
@@ -629,7 +631,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
         tbe.L3Hit := true;
         tbe.MemData := true;
-        L3CacheMemory.deallocate(address);
+        L3CacheMemory.deallocate(address); //TODO why?
       } else {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
           out_msg.addr := address;
@@ -656,6 +658,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.LastSender := entry.LastSender;
         tbe.L3Hit := true;
         tbe.MemData := true;
+        /*  TODO Deallocating the cache entry here necessitates reallocating once
+         *  transaction completes. It is unclear why it is done this way.
+         *  Since the TBE is maintained independently to the entry, and since
+         *  probes and memory responses reconcile at the TBE, it is safe to
+         *  maintain the L3 line until transaction completion.
+         *  Perhaps the entry is merely a placeholder that is shared between requests intermittently?
+         */
         L3CacheMemory.deallocate(address);
       } else {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
@@ -956,7 +965,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(d_writeDataToMemory, "d", desc="Write data to memory") {
     peek(responseNetwork_in, ResponseMsg) {
-      // here too memory write can be saved if not dirty
+      // here too memory write can be saved if L2 victim not dirty
       if (in_msg.Dirty) {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
           out_msg.addr := address;
@@ -978,12 +987,17 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         //}
 
       } else {
-        assert (tbe.dirty == false); //default unchanged
+        assert (tbe.Dirty == false); //default unchanged
         // we are skipping writing to the memory if victim is clean
+        // TODO: If an intermediate GPU write has dirtied L3, would the
+        //      victim be written back without incorporating GPU's stuff?
+        //      The way it's done now, that's how it is
 
         // have to update the TBE, too, because of how this
         // directory deals with functional writes
         tbe.DataBlk := in_msg.DataBlk;
+        // gratuitous
+        tbe.Dirty   := in_msg.Dirty;
       }
     }
   }
@@ -1085,6 +1099,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(wd_writeBackData, "wd", desc="Write back data if needed") {
+    /*  Write to memory only if wtData, atomicData or tbe is dirty
+     *  which can be due to dirty probe responses received -- which
+     *  indicates that a previous owner has relinquished the dirty line
+     */
     if (tbe.wtData || tbe.atomicData || tbe.Dirty) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
@@ -1098,14 +1116,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask);
         }
       }
-      enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-        out_msg.addr := address;
-        out_msg.Type := MemoryRequestType:MEMORY_WB;
-        out_msg.Sender := machineID;
-        out_msg.MessageSize := MessageSizeType:Writeback_Data;
-        out_msg.DataBlk := tbe.DataBlk;
-        DPRINTF(ProtocolTrace, "%s\n", out_msg);
-      }
+      // Skipping writing to memory blindly, a compulsorily following 
+      // action will determine if it's necessary to write back data.
+      // The above action on atomicData will still be needed.
+
+      //enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+      //  out_msg.addr := address;
+      //  out_msg.Type := MemoryRequestType:MEMORY_WB;
+      //  out_msg.Sender := machineID;
+      //  out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      //  out_msg.DataBlk := tbe.DataBlk;
+      //  DPRINTF(ProtocolTrace, "%s\n", out_msg);
+      //}
     }
   }
 
@@ -1292,13 +1314,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     // we have already written to memory if in_msg.Dirty
     // rewrite L3 iff in_msg.Dirty -- best case, this saves a memory read
     // worst case, this may need to be evicted on a critical path
-    if (in_msg.Dirty) {
-      peek(responseNetwork_in, ResponseMsg) {
+    peek(responseNetwork_in, ResponseMsg) {
+      if (in_msg.Dirty) {
         if (L3CacheMemory.isTagPresent(address)) {
           CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
           APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
           entry.DataBlk := in_msg.DataBlk;
           entry.LastSender := in_msg.Sender;
+          // in case the entry is already dirty to begin with 
+          // (due to a prior dirty write, not yet written back)
+          // retain the dirty bit, even if this victim is clean
+          // TODO does the consistency model allow this?
+          entry.Dirty := entry.Dirty || in_msg.Dirty;
           assert(is_valid(tbe));
           //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
           //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
@@ -1309,13 +1336,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             Addr victim := L3CacheMemory.cacheProbe(address);
             CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                    L3CacheMemory.lookup(victim));
-            enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-              out_msg.addr := victim;
-              out_msg.Type := MemoryRequestType:MEMORY_WB;
-              out_msg.Sender := machineID;
-              out_msg.MessageSize := MessageSizeType:Writeback_Data;
-              out_msg.DataBlk := victim_entry.DataBlk;
-            }
+            if (victim_entry.Dirty) {
+              enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+                out_msg.addr := victim;
+                out_msg.Type := MemoryRequestType:MEMORY_WB;
+                out_msg.Sender := machineID;
+                out_msg.MessageSize := MessageSizeType:Writeback_Data;
+                out_msg.DataBlk := victim_entry.DataBlk;
+              }
+            } // else do not write-back, directly deallocate
+              // since it's guaranteed memory has not diverged from L3
             L3CacheMemory.deallocate(victim);
           }
           assert(L3CacheMemory.cacheAvail(address));
@@ -1329,7 +1359,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         // best case: the original L3 from which the victim was originally sourced
         //            has not been evicted, so a reallocation is redundant
         // worst case: functionally correct, but a missed free caching opportunity
-    }
+    } 
   }
 
   action(alwt_allocateL3BlockOnWT, "alwt", desc="allocate the L3 block on WT") {
@@ -1340,18 +1370,32 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
         entry.DataBlk := tbe.DataBlk;
         entry.LastSender := tbe.LastSender;
+        // this ensures dirty probes are recognized
+        // and also carries forward the original dirtyness of the line
+        entry.Dirty := entry.Dirty || tbe.Dirty;
       } else {
         if (L3CacheMemory.cacheAvail(address) == false) {
           Addr victim := L3CacheMemory.cacheProbe(address);
           CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                  L3CacheMemory.lookup(victim));
-          enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-            out_msg.addr := victim;
-            out_msg.Type := MemoryRequestType:MEMORY_WB;
-            out_msg.Sender := machineID;
-            out_msg.MessageSize := MessageSizeType:Writeback_Data;
-            out_msg.DataBlk := victim_entry.DataBlk;
-          }
+          if (victim_entry.Dirty) {
+            /* This condition does not help improve performance since
+             * we are not waiting for the WBAck from memory anyway
+             * However, the memory traffic will be greatly reduced.
+             * However, since we are skipping updating memory when clean,
+             * we may need to wait for the acknowledgement lest memory and L3 diverge,
+             * in which case, still, L3 would have the latest copy.
+             */
+            enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+              out_msg.addr := victim;
+              out_msg.Type := MemoryRequestType:MEMORY_WB;
+              out_msg.Sender := machineID;
+              out_msg.MessageSize := MessageSizeType:Writeback_Data;
+              out_msg.DataBlk := victim_entry.DataBlk;
+            }
+            // TODO do we need to wait for WBAck?
+          } // else, drop WB because memory and clean L3 are 
+            // by definition reconciled
           L3CacheMemory.deallocate(victim);
         }
         assert(L3CacheMemory.cacheAvail(address));
@@ -1359,6 +1403,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         APPEND_TRANSITION_COMMENT(" al wrote data to L3 ");
         entry.DataBlk := tbe.DataBlk;
         entry.LastSender := tbe.LastSender;
+        entry.Dirty := tbe.Dirty;
+        /* because the new allocation can now be dirty, the memory writeback can be skipped
+         * Next time an L3 line is victimized, it will only be written back iff also dirty
+         */
       }
     }
   }
