@@ -152,13 +152,14 @@ GlobalMemPipeline::exec()
         // Decrement outstanding requests count
         computeUnit.shader->ScheduleAdd(&w->outstandingReqs, m->time, -1);
         if (m->isStore() || m->isAtomic() || m->isMemSync()) {
-            computeUnit.shader->sampleStore(accessTime);
+            computeUnit.shader->sampleStore(accessTime, m->isAtomic(), curTick(), m->isMemSync());
+
             computeUnit.shader->ScheduleAdd(&w->outstandingReqsWrGm,
                                              m->time, -1);
         }
 
         if (m->isLoad() || m->isAtomic() || m->isMemSync()) {
-            computeUnit.shader->sampleLoad(accessTime);
+            computeUnit.shader->sampleLoad(accessTime, m->isAtomic(), curTick());
             computeUnit.shader->ScheduleAdd(&w->outstandingReqsRdGm,
                                              m->time, -1);
         }

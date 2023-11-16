@@ -1391,7 +1391,15 @@ namespace Gcn3ISA
 
     struct InFmt_FLAT
     {
-        unsigned int  pad_0_15 : 16;
+        //unsigned int  pad_0_15 : 16;
+        //unsigned int       GLC : 1;
+        //unsigned int       SLC : 1;
+        //unsigned int        OP : 7;
+        //unsigned int    pad_25 : 1;
+        //unsigned int  ENCODING : 6;
+        unsigned int    OFFSET : 13;
+        unsigned int       LDS : 1;
+        unsigned int       SEG : 2;
         unsigned int       GLC : 1;
         unsigned int       SLC : 1;
         unsigned int        OP : 7;
@@ -1401,11 +1409,17 @@ namespace Gcn3ISA
 
     struct InFmt_FLAT_1
     {
+        //unsigned int      ADDR : 8;
+        //unsigned int      DATA : 8;
+        //unsigned int pad_16_22 : 7;
+        //unsigned int       TFE : 1;
+        //unsigned int      VDST : 8;
         unsigned int      ADDR : 8;
         unsigned int      DATA : 8;
-        unsigned int pad_16_22 : 7;
-        unsigned int       TFE : 1;
+        unsigned int     SADDR : 7;
+        unsigned int        NV : 1;
         unsigned int      VDST : 8;
+
     };
 
     struct InFmt_INST

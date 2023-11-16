@@ -106,8 +106,8 @@ class Shader : public ClockedObject
     enum hsail_mode_e {SIMT,VECTOR_SCALAR};
 
     GPUDispatcher &dispatcher();
-    void sampleLoad(const Tick accessTime);
-    void sampleStore(const Tick accessTime);
+    void sampleLoad(const Tick accessTime, bool isAtomic, const Tick t);
+    void sampleStore(const Tick accessTime, bool isAtomic, const Tick t, bool isSync);
     void sampleInstRoundTrip(std::vector<Tick> roundTripTime);
     void sampleLineRoundTrip(const std::map<Addr,
         std::vector<Tick>> &roundTripTime);
