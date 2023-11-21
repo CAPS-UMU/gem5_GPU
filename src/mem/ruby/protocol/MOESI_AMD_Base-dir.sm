@@ -1347,10 +1347,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
                 out_msg.MessageSize := MessageSizeType:Writeback_Data;
                 out_msg.DataBlk := victim_entry.DataBlk;
               }
+              DPRINTF(RubySlicc, "L3VictimWriteBack NotSaved\n");
             } else {
               // do not write-back, directly deallocate
               // since it's guaranteed memory has not diverged from L3
-              DPRINTF(RubySlicc, "Lazymuth: saved clean L3 victim writeback\n");
+              DPRINTF(RubySlicc, "L3VictimWriteBack Saved\n");
             }
             L3CacheMemory.deallocate(victim);
           }
@@ -1362,17 +1363,26 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.LastSender := in_msg.Sender;
           entry.Dirty := true;
         }
+        DPRINTF(RubySlicc, "L2VictimWriteToL3 Happened\n");
       } else {
         // do not allocate L3 block
         // best case: the original L3 from which the victim was originally sourced
         //            has not been evicted, so a reallocation is redundant
         // worst case: functionally correct, but a missed free caching opportunity
-        DPRINTF(RubySlicc, "Lazymuth: L2 victim dirty, updating L3\n");
+        DPRINTF(RubySlicc, "L2VictimWriteToL3 DidNotHappen\n");
       }
     } 
   }
 
   action(alwt_allocateL3BlockOnWT, "alwt", desc="allocate the L3 block on WT") {
+    /* Since LLC is a victim cache, reads misses are not cached there, only victim evictions from L2s;
+     * and since we are also necessarily probe-broadcasting upon read misses at the directory, if there 
+     * were earlier read misses (which means there's data already in the system), one of the probes 
+     * will solicit that data at the directory. There is a potential optimization here with which we
+     * could avoid reading the LLC -- which will miss and initiate a memory read, and instead only 
+     * wait for the probes to return with a either dirty **or clean** data.
+     * This also means LLC is not an inclusive cache -- it excludes read missed blocks.
+     */
     if ((tbe.wtData || tbe.atomicData) && useL3OnWT) {
       //This tag check does not need to be counted as a hit or Miss, it has already been recorded.
       if (L3CacheMemory.isTagPresent(address)) {
@@ -1382,7 +1392,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         entry.LastSender := tbe.LastSender;
         // this ensures dirty probes are recognized
         // and also carries forward the original dirtyness of the line
-        entry.Dirty := entry.Dirty || tbe.Dirty;
+        entry.Dirty := true; // override
       } else {
         if (L3CacheMemory.cacheAvail(address) == false) {
           Addr victim := L3CacheMemory.cacheProbe(address);
@@ -1403,9 +1413,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               out_msg.MessageSize := MessageSizeType:Writeback_Data;
               out_msg.DataBlk := victim_entry.DataBlk;
             }
+            DPRINTF(RubySlicc, "L3VictimWriteBack NotSaved\n");
             // TODO do we need to wait for WBAck?
-          } // else, drop WB because memory and clean L3 are 
+          } else {
+            // else, drop WB because memory and clean L3 are 
             // by definition reconciled
+            DPRINTF(RubySlicc, "L3VictimWriteBack Saved\n");
+          }
           L3CacheMemory.deallocate(victim);
         }
         assert(L3CacheMemory.cacheAvail(address));
@@ -1413,6 +1427,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         APPEND_TRANSITION_COMMENT(" al wrote data to L3 ");
         entry.DataBlk := tbe.DataBlk;
         entry.LastSender := tbe.LastSender;
+        assert(tbe.Dirty == true);
         entry.Dirty := tbe.Dirty;
         /* because the new allocation can now be dirty, the memory writeback can be skipped
          * Next time an L3 line is victimized, it will only be written back iff also dirty

@@ -554,7 +554,7 @@ def construct_dirs(options, system, ruby_system, network):
         dir_cntrl = DirCntrl(noTCCdir=True, TCC_select_num_bits=TCC_bits)
         dir_cntrl.create(options, dir_ranges, ruby_system, system)
         dir_cntrl.number_of_TBEs = options.num_tbes
-        dir_cntrl.useL3OnWT = options.use_L3_on_WT
+        dir_cntrl.useL3OnWT = True
         dir_cntrl.L2isWB = options.WB_L2
         # the number_of_TBEs is inclusive of TBEs below
 
@@ -618,7 +618,7 @@ def construct_gpudirs(options, system, ruby_system, network):
         dir_cntrl = DirCntrl(noTCCdir=True, TCC_select_num_bits=TCC_bits)
         dir_cntrl.create(options, [addr_range], ruby_system, system)
         dir_cntrl.number_of_TBEs = options.num_tbes
-        dir_cntrl.useL3OnWT = False
+        dir_cntrl.useL3OnWT = True
         dir_cntrl.L2isWB = options.WB_L2
 
         # Connect the Directory controller to the ruby network
