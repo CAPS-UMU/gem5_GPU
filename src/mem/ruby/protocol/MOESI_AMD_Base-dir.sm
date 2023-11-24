@@ -251,6 +251,33 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     getDirectoryEntry(addr).changePermission(Directory_State_to_permission(state));
   }
 
+  void recordRequestType(RequestType request_type, Addr addr) {
+    if (request_type == RequestType:L3DataArrayRead) {
+        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayRead, addr);
+    } else if (request_type == RequestType:L3DataArrayWrite) {
+        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayWrite, addr);
+    } else if (request_type == RequestType:L3TagArrayRead) {
+        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayRead, addr);
+    } else if (request_type == RequestType:L3TagArrayWrite) {
+        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayWrite, addr);
+    }
+  }
+
+  bool checkResourceAvailable(RequestType request_type, Addr addr) {
+    if (request_type == RequestType:L3DataArrayRead) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:DataArray, addr);
+    } else if (request_type == RequestType:L3DataArrayWrite) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:DataArray, addr);
+    } else if (request_type == RequestType:L3TagArrayRead) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else if (request_type == RequestType:L3TagArrayWrite) {
+      return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else {
+      error("Invalid RequestType type in checkResourceAvailable");
+      return true;
+    }
+  }
+
   // ** OUT_PORTS **
   out_port(dmaResponseQueue_out, DMAResponseMsg, responseToDMA);
 
@@ -424,7 +451,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(s_sendResponseS, "s", desc="send Shared response") {
     if(!tbe.responded) {
-      DPRINTF(RubySlicc, "NotEarly: Responding to RdBlkS\n", tbe.TBEState);
+      DPRINTF(OPT, "NotEarly: Responding to RdBlkS\n");
       enqueue(responseNetwork_out, ResponseMsg, response_latency) {
         out_msg.addr := address;
         out_msg.Type := CoherenceResponseType:NBSysResp;
@@ -450,7 +477,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(es_sendResponseES, "es", desc="send Exclusive or Shared response") {
     if(!tbe.responded) {
-      DPRINTF(RubySlicc, "NotEarly: Responding to RdBlk\n", tbe.TBEState);
+      DPRINTF(OPT, "NotEarly: Responding to RdBlk\n");
       enqueue(responseNetwork_out, ResponseMsg, response_latency) {
         out_msg.addr := address;
         out_msg.Type := CoherenceResponseType:NBSysResp;
@@ -481,7 +508,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(m_sendResponseM, "m", desc="send Modified response") {
     if(!tbe.responded) {
-      DPRINTF(RubySlicc, "NotEarly: Responding to RdBlkM\n", tbe.TBEState);
+      DPRINTF(OPT, "NotEarly: Responding to RdBlkM\n");
       if (tbe.wtData) {
         enqueue(triggerQueue_out, TriggerMsg, 1) {
           out_msg.addr := address;
@@ -1111,7 +1138,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(edc_earlyDataToCore, "edc", desc="early data to core") {
     if(tbe.readyToResp && !tbe.responded) {
       if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
-        DPRINTF(RubySlicc, "Early: Responding to RdBlkM/WT/Atomic\n", tbe.TBEState);
+        DPRINTF(OPT, "Early: Responding to RdBlkM/WT/Atomic at %d probes\n", tbe.NumPendingAcks);
         /* this would otherwise have been done before
          * responding to the core, as part of writing back to memory
          * since we are skipping that part now, we need to do that here
@@ -1158,7 +1185,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
         }
       } else if (tbe.TBEState == State:BS_PM || tbe.TBEState == State:BS_Pm) {
-        DPRINTF(RubySlicc, "Early: Responding to RdBlkS\n", tbe.TBEState);
+        DPRINTF(OPT, "Early: Responding to RdBlkS at %d probes\n", tbe.NumPendingAcks);
         enqueue(responseNetwork_out, ResponseMsg, response_latency) {
           out_msg.addr := address;
           out_msg.Type := CoherenceResponseType:NBSysResp;
@@ -1180,7 +1207,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           DPRINTF(RubySlicc, "%s\n", out_msg);
         }
       } else if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
-        DPRINTF(RubySlicc, "Early: Responding to RdBlk\n", tbe.TBEState);
+        DPRINTF(OPT, "Early: Responding to RdBlk at %d probes\n", tbe.NumPendingAcks);
         enqueue(responseNetwork_out, ResponseMsg, response_latency) {
           out_msg.addr := address;
           out_msg.Type := CoherenceResponseType:NBSysResp;

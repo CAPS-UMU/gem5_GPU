@@ -30929,6 +30929,11 @@ namespace Gcn3ISA
     Inst_DS__DS_ADD_U32::Inst_DS__DS_ADD_U32(InFmt_DS *iFmt)
         : Inst_DS(iFmt, "ds_add_u32")
     {
+        setFlag(MemoryRef);
+        setFlag(GroupSegment);
+        setFlag(AtomicAdd);
+        setFlag(AtomicNoReturn);
+
     } // Inst_DS__DS_ADD_U32
 
     Inst_DS__DS_ADD_U32::~Inst_DS__DS_ADD_U32()
@@ -30941,8 +30946,49 @@ namespace Gcn3ISA
     void
     Inst_DS__DS_ADD_U32::execute(GPUDynInstPtr gpuDynInst)
     {
-        panicUnimplemented();
+        Wavefront *wf = gpuDynInst->wavefront();
+
+        if (gpuDynInst->exec_mask.none()) {
+            wf->decLGKMInstsIssued();
+            return;
+        }
+
+        gpuDynInst->execUnitId = wf->execUnitId;
+        gpuDynInst->latency.init(gpuDynInst->computeUnit());
+        gpuDynInst->latency.set(
+                gpuDynInst->computeUnit()->cyclesToTicks(Cycles(24)));
+        ConstVecOperandU32 addr(gpuDynInst, extData.ADDR);
+        ConstVecOperandU32 data(gpuDynInst, extData.DATA0);
+
+        addr.read();
+        data.read();
+
+        calcAddr(gpuDynInst, addr);
+
+        for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+            if (gpuDynInst->exec_mask[lane]) {
+                (reinterpret_cast<VecElemU32*>(gpuDynInst->a_data))[lane]
+                    = data[lane];
+            }
+        }
+
+        gpuDynInst->computeUnit()->localMemoryPipe.issueRequest(gpuDynInst);
     }
+
+    void
+    Inst_DS__DS_ADD_U32::initiateAcc(GPUDynInstPtr gpuDynInst)
+    {
+        Addr offset0 = instData.OFFSET0;
+        Addr offset1 = instData.OFFSET1;
+        Addr offset = (offset1 << 8) | offset0;
+
+        initAtomicAccess<VecElemU32>(gpuDynInst, offset);
+    } // initiateAcc
+
+    void
+    Inst_DS__DS_ADD_U32::completeAcc(GPUDynInstPtr gpuDynInst)
+    {
+    } // completeAcc
 
     Inst_DS__DS_SUB_U32::Inst_DS__DS_SUB_U32(InFmt_DS *iFmt)
         : Inst_DS(iFmt, "ds_sub_u32")
@@ -40727,8 +40773,57 @@ namespace Gcn3ISA
     void
     Inst_FLAT__FLAT_ATOMIC_SMAX::execute(GPUDynInstPtr gpuDynInst)
     {
-        panicUnimplemented();
-    }
+        Wavefront *wf = gpuDynInst->wavefront();
+
+        if (gpuDynInst->exec_mask.none()) {
+            wf->decVMemInstsIssued();
+            wf->decLGKMInstsIssued();
+            return;
+        }
+
+        gpuDynInst->execUnitId = wf->execUnitId;
+        gpuDynInst->latency.init(gpuDynInst->computeUnit());
+        gpuDynInst->latency.set(gpuDynInst->computeUnit()->clockPeriod());
+
+        ConstVecOperandU32 data(gpuDynInst, extData.DATA);
+
+        data.read();
+
+        calcAddr(gpuDynInst, extData.ADDR, extData.SADDR, instData.OFFSET);
+
+        for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+            if (gpuDynInst->exec_mask[lane]) {
+                (reinterpret_cast<VecElemU32*>(gpuDynInst->a_data))[lane]
+                    = data[lane];                                                                                                                                                                                  
+            }
+        }
+
+        issueRequestHelper(gpuDynInst);
+    } // execute
+
+    void
+    Inst_FLAT__FLAT_ATOMIC_SMAX::initiateAcc(GPUDynInstPtr gpuDynInst)
+    {
+        initAtomicAccess<VecElemU32>(gpuDynInst);
+    } // initiateAcc
+
+    void
+    Inst_FLAT__FLAT_ATOMIC_SMAX::completeAcc(GPUDynInstPtr gpuDynInst)
+    {
+        if (isAtomicRet()) {
+            VecOperandU32 vdst(gpuDynInst, extData.VDST);
+
+            for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+                if (gpuDynInst->exec_mask[lane]) {
+                    vdst[lane] = (reinterpret_cast<VecElemU32*>(
+                        gpuDynInst->d_data))[lane];
+                }
+            }
+
+            vdst.write();
+        }
+    } // completeAcc
+
 
     Inst_FLAT__FLAT_ATOMIC_UMAX::Inst_FLAT__FLAT_ATOMIC_UMAX(InFmt_FLAT *iFmt)
         : Inst_FLAT(iFmt, "flat_atomic_umax")

@@ -504,6 +504,27 @@ namespace Gcn3ISA
             }
         }
 
+        template<typename T>
+        void
+        initAtomicAccess(GPUDynInstPtr gpuDynInst, Addr offset)
+        {
+            Wavefront *wf = gpuDynInst->wavefront();
+
+            for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+                if (gpuDynInst->exec_mask[lane]) {
+                    Addr vaddr = gpuDynInst->addr[lane] + offset;
+
+                    AtomicOpFunctorPtr amo_op =
+                        gpuDynInst->makeAtomicOpFunctor<T>(
+                        &(reinterpret_cast<T*>(gpuDynInst->a_data))[lane],
+                        &(reinterpret_cast<T*>(gpuDynInst->x_data))[lane]);
+
+                    (reinterpret_cast<T*>(gpuDynInst->d_data))[lane]
+                        = wf->ldsChunk->atomic<T>(vaddr, std::move(amo_op));
+                }
+            }
+        }
+
         void
         calcAddr(GPUDynInstPtr gpuDynInst, ConstVecOperandU32 &addr)
         {
@@ -880,6 +901,10 @@ namespace Gcn3ISA
         void
         initAtomicAccess(GPUDynInstPtr gpuDynInst)
         {
+            // Flat scratch requests may not be atomic according to ISA manual
+            // up to MI200. See MI200 manual Table 45.
+            assert(gpuDynInst->executedAs() != enums::SC_PRIVATE);
+
             if (gpuDynInst->executedAs() == enums::SC_GLOBAL) {
                 initMemReqHelper<T, 1>(gpuDynInst, MemCmd::SwapReq, true);
             } else if (gpuDynInst->executedAs() == enums::SC_GROUP) {
@@ -913,11 +938,113 @@ namespace Gcn3ISA
             }
             gpuDynInst->resolveFlatSegment(gpuDynInst->exec_mask);
         }
+        void
+        calcAddr(GPUDynInstPtr gpuDynInst, ScalarRegU32 vaddr,
+                 ScalarRegU32 saddr, ScalarRegI32 offset)
+        {
+            // Offset is a 13-bit field w/the following meanings:
+            // In Flat instructions, offset is a 12-bit unsigned number
+            // In Global/Scratch instructions, offset is a 13-bit signed number
+            if (isFlat()) {
+                offset = offset & 0xfff;
+            } else {
+                offset = (ScalarRegI32)sext<13>(offset);
+            }
+            // If saddr = 0x7f there is no scalar reg to read and address will
+            // be a 64-bit address. Otherwise, saddr is the reg index for a
+            // scalar reg used as the base address for a 32-bit address.
+            if ((saddr == 0x7f && (isFlatGlobal() || isFlatScratch()))
+                || isFlat()) {
+                ConstVecOperandU64 vbase(gpuDynInst, vaddr);
+                vbase.read();
+
+                calcAddrVgpr(gpuDynInst, vbase, offset);
+            } else {
+                // Assume we are operating in 64-bit mode and read a pair of
+                // SGPRs for the address base.
+                ConstScalarOperandU64 sbase(gpuDynInst, saddr);
+                sbase.read();
+
+                ConstVecOperandU32 voffset(gpuDynInst, vaddr);
+                voffset.read();
+
+                calcAddrSgpr(gpuDynInst, voffset, sbase, offset);
+            }
+
+            if (isFlat()) {
+                gpuDynInst->resolveFlatSegment(gpuDynInst->exec_mask);
+            } else if (isFlatGlobal()) {
+                gpuDynInst->staticInstruction()->executed_as =
+                    enums::SC_GLOBAL;
+            } else {
+                assert(isFlatScratch());
+                gpuDynInst->staticInstruction()->executed_as =
+                    enums::SC_PRIVATE;
+            }
+        }
+
+        void
+        issueRequestHelper(GPUDynInstPtr gpuDynInst)
+        {
+            if ((gpuDynInst->executedAs() == enums::SC_GLOBAL && isFlat())
+                    || isFlatGlobal()) {
+                gpuDynInst->computeUnit()->globalMemoryPipe
+                    .issueRequest(gpuDynInst);
+            } else if (gpuDynInst->executedAs() == enums::SC_GROUP) {
+                assert(isFlat());
+                gpuDynInst->computeUnit()->localMemoryPipe
+                    .issueRequest(gpuDynInst);
+            } else {
+                assert(gpuDynInst->executedAs() == enums::SC_PRIVATE);
+                gpuDynInst->computeUnit()->globalMemoryPipe
+                    .issueRequest(gpuDynInst);
+            }
+        }
+
+        bool
+        vgprIsOffset()
+        {
+            return (extData.SADDR != 0x7f);
+        }
 
         // first instruction DWORD
         InFmt_FLAT instData;
         // second instruction DWORD
         InFmt_FLAT_1 extData;
+
+      private:
+        void initFlatOperandInfo();
+        void initGlobalScratchOperandInfo();
+
+        void generateFlatDisassembly();
+        void generateGlobalScratchDisassembly();
+
+        void
+        calcAddrSgpr(GPUDynInstPtr gpuDynInst, ConstVecOperandU32 &vaddr,
+                     ConstScalarOperandU64 &saddr, ScalarRegI32 offset)
+        {
+            // Use SGPR pair as a base address and add VGPR-offset and
+            // instruction offset. The VGPR-offset is always 32-bits so we
+            // mask any upper bits from the vaddr.
+            for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+                if (gpuDynInst->exec_mask[lane]) {
+                    ScalarRegI32 voffset = vaddr[lane];
+                    gpuDynInst->addr.at(lane) =
+                        saddr.rawData() + voffset + offset;
+                }
+            }
+        }
+
+        void
+        calcAddrVgpr(GPUDynInstPtr gpuDynInst, ConstVecOperandU64 &addr,
+                     ScalarRegI32 offset)
+        {
+            for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
+                if (gpuDynInst->exec_mask[lane]) {
+                    gpuDynInst->addr.at(lane) = addr[lane] + offset;
+                }
+            }
+        }
     }; // Inst_FLAT
 } // namespace Gcn3ISA
 } // namespace gem5
