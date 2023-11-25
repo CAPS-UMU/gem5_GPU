@@ -129,6 +129,9 @@ class StateMachine(Symbol):
         self.debug_flags = set()
         self.debug_flags.add("RubyGenerated")
         self.debug_flags.add("RubySlicc")
+        self.debug_flags.add("OPT1")
+        self.debug_flags.add("OPT2")
+        self.debug_flags.add("OPT3")
 
     def __repr__(self):
         return f"[StateMachine: {self.ident}]"

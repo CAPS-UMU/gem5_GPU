@@ -463,12 +463,12 @@ Shader::sampleStore(const Tick accessTime, bool isAtomic, const Tick t, bool isS
 {
     stats.storeLatencyDist.sample(accessTime);
     stats.allLatencyDist.sample(accessTime);
-    if(isAtomic)
-      std::cout << "ATOMIC_ST_LAT " << accessTime << " " <<  t << std::endl;
-    else if(isSync)
-      std::cout << "SYNC_LAT " << accessTime << " " <<  t << std::endl;
-    else
-      std::cout << "STORE_LAT " << accessTime << " " << t << std::endl;
+    //if(isAtomic)
+    //  std::cout << "ATOMIC_ST_LAT " << accessTime << " " <<  t << std::endl;
+    //else if(isSync)
+    //  std::cout << "SYNC_LAT " << accessTime << " " <<  t << std::endl;
+    //else
+    //  std::cout << "STORE_LAT " << accessTime << " " << t << std::endl;
 }
 
 /*
@@ -479,9 +479,9 @@ Shader::sampleLoad(const Tick accessTime, bool isAtomic, const Tick t)
 {
     stats.loadLatencyDist.sample(accessTime);
     stats.allLatencyDist.sample(accessTime);
-    std::cout << "LOAD_LAT " << accessTime << " " << t << std::endl;
-    if(isAtomic)
-      std::cout << "ATOMIC_LD_LAT " << accessTime << " " << t << std::endl;
+    //std::cout << "LOAD_LAT " << accessTime << " " << t << std::endl;
+    //if(isAtomic)
+    //  std::cout << "ATOMIC_LD_LAT " << accessTime << " " << t << std::endl;
 }
 
 void
