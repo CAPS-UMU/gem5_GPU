@@ -421,6 +421,7 @@ def define_options(parser):
         "--no-tcc-resource-stalls", action="store_false", default=True
     )
     parser.add_argument("--use-L3-on-WT", action="store_true", default=False)
+    parser.add_argument("--no-WB-clean-victims", action="store_true", default=False)
     parser.add_argument("--num-tbes", type=int, default=256)
     parser.add_argument("--l2-latency", type=int, default=50)  # load to use
     parser.add_argument(
