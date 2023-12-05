@@ -1687,7 +1687,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   // there is now a new possibility of core unblocking before all probes/memory is read
   transition({BM_M, BM_PM, BM_Pm, BS_M, BS_PM, BS_Pm, B_M, B_PM, B_Pm}, CoreUnblock) {
-    z_stall;
+    st_stallAndWaitRequest;
   }
 
   transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, WBAck) {
