@@ -29,9 +29,18 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+ * -- Uses a probe filter memory to track ownership (not sharers).
+ * -- The probe filter can be inclusive or non-inclusive
+ * -- Only two owners tracked. Sharers are a) GPU or/and  b) CPU
+ * -- If sharer information available, the sharer is probed
+ * -- If sharer information not available, probes are broadcasted
+ */
+
 machine(MachineType:Directory, "AMD Baseline protocol")
 : DirectoryMemory * directory;
   CacheMemory * L3CacheMemory;
+  CacheMemory * ProbeFilterMemory;
   Cycles response_latency := 5;
   Cycles l3_hit_latency := 50;
   bool noTCCdir := "False";
@@ -41,6 +50,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   bool useL3OnWT := "False";
   bool noWBCleanVictims := "False";
   bool L2isWB;
+  bool inclusiveDir := "True";
   Cycles to_memory_controller_latency := 1;
 
   // DMA
@@ -85,6 +95,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     BM_Pm, AccessPermission:Backing_Store,      desc="blocked waiting for probes, already got memory";
     B_Pm, AccessPermission:Backing_Store,       desc="blocked waiting for probes, already got memory";
     B, AccessPermission:Backing_Store,          desc="sent response, Blocked til ack";
+    B_P, AccessPermission:Backing_Store,      desc="Back invalidation, waiting for probes";
 
     F, AccessPermission:Busy, desc="sent Flus, blocked till ack";
   }
@@ -112,6 +123,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
     L3Hit,              desc="Hit in L3 return data to core";
 
+    // Replacement
+    PF_Repl,            desc="Replace address from probe filter";
+
     // Memory Controller
     MemData, desc="Fetched data from memory arrives";
     WBAck, desc="Writeback Ack from memory arrives";
@@ -134,9 +148,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     L3DataArrayWrite,   desc="Write the data array";
     L3TagArrayRead,     desc="Read the data array";
     L3TagArrayWrite,    desc="Write the data array";
+
+    PFTagArrayRead,     desc="Read the data array";
+    PFTagArrayWrite,    desc="Write the data array";
   }
 
   // TYPES
+
+  enumeration(ProbeFilterState, desc="") {
+    T,  desc="Tracked";
+    NT, desc="Not tracked";
+    B, desc="Blocked, This entry is being replaced";
+  }
 
   // DirectoryEntry
   structure(Entry, desc="...", interface="AbstractCacheEntry", main="false") {
@@ -148,6 +171,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     DataBlock DataBlk,          desc="data for the block";
     MachineID LastSender,       desc="Mach which this block came from";
     bool Dirty,                 desc="dirty bit to alleviate excessive clean-victim writebacks";
+    ProbeFilterState pfState,   desc="ProbeFilter state",default="Directory_ProbeFilterState_NT";
+    bool isOnCPU,               desc="Block valid in the CPU complex",default="false";
+    bool isOnGPU,               desc="Block valid in the GPU complex",default="false";
   }
 
   structure(TBE, desc="...") {
@@ -172,6 +198,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     WriteMask writeMask,    desc="outstanding write through mask";
     int Len,            desc="Length of memory request for DMA";
     bool isSLCSet,      desc="Bypass L1 and L2 Cache";
+    Addr demandAddress,  desc="Address of demand request which caused probe filter eviction";
   }
 
   structure(TBETable, external="yes") {
@@ -255,13 +282,17 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   void recordRequestType(RequestType request_type, Addr addr) {
     if (request_type == RequestType:L3DataArrayRead) {
-        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayRead, addr);
+      L3CacheMemory.recordRequestType(CacheRequestType:DataArrayRead, addr);
     } else if (request_type == RequestType:L3DataArrayWrite) {
-        L3CacheMemory.recordRequestType(CacheRequestType:DataArrayWrite, addr);
+      L3CacheMemory.recordRequestType(CacheRequestType:DataArrayWrite, addr);
     } else if (request_type == RequestType:L3TagArrayRead) {
-        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayRead, addr);
+      L3CacheMemory.recordRequestType(CacheRequestType:TagArrayRead, addr);
     } else if (request_type == RequestType:L3TagArrayWrite) {
-        L3CacheMemory.recordRequestType(CacheRequestType:TagArrayWrite, addr);
+      L3CacheMemory.recordRequestType(CacheRequestType:TagArrayWrite, addr);
+    } else if (request_type == RequestType:PFTagArrayRead) {
+      ProbeFilterMemory.recordRequestType(CacheRequestType:TagArrayRead, addr);
+    } else if (request_type == RequestType:PFTagArrayWrite) {
+      ProbeFilterMemory.recordRequestType(CacheRequestType:TagArrayWrite, addr);
     }
   }
 
@@ -274,6 +305,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
     } else if (request_type == RequestType:L3TagArrayWrite) {
       return L3CacheMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else if (request_type == RequestType:PFTagArrayRead) {
+      return ProbeFilterMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
+    } else if (request_type == RequestType:PFTagArrayWrite) {
+      return ProbeFilterMemory.checkResourceAvailable(CacheResourceType:TagArray, addr);
     } else {
       error("Invalid RequestType type in checkResourceAvailable");
       return true;
@@ -283,6 +318,38 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   // ** OUT_PORTS **
   out_port(dmaResponseQueue_out, DMAResponseMsg, responseToDMA);
 
+  bool isNotPresentProbeFilter(Addr address) {
+    if (ProbeFilterMemory.isTagPresent(address) ||
+        ProbeFilterMemory.cacheAvail(address)) {
+        return false;
+    }
+    return true;
+  }
+
+  bool isGPUSharer(Addr address) {
+    assert(ProbeFilterMemory.isTagPresent(address));
+    CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+    if (entry.pfState == ProbeFilterState:NT) {
+       return true;
+    } else if (entry.isOnGPU){
+       return true;
+    }
+    return false;
+  }
+
+  bool isCPUSharer(Addr address) {
+    assert(ProbeFilterMemory.isTagPresent(address));
+    CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+    if (entry.pfState == ProbeFilterState:NT) {
+       return true;
+    } else if (entry.isOnCPU){
+       return true;
+    }
+    return false;
+  }
+
+
+  // ** OUT_PORTS **
   out_port(probeNetwork_out, NBProbeRequestMsg, probeToCore);
   out_port(responseNetwork_out, ResponseMsg, responseToCore);
 
@@ -395,7 +462,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       peek(requestNetwork_in, CPURequestMsg) {
         TBE tbe := TBEs.lookup(in_msg.addr);
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(in_msg.addr));
-        if (in_msg.Type == CoherenceRequestType:RdBlk) {
+        if (inclusiveDir && isNotPresentProbeFilter(in_msg.addr)) {
+            Addr victim := ProbeFilterMemory.cacheProbe(in_msg.addr);
+            tbe := TBEs.lookup(victim);
+            entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(victim));
+            trigger(Event:PF_Repl, victim, entry, tbe);
+        } else if (in_msg.Type == CoherenceRequestType:RdBlk) {
           trigger(Event:RdBlk, in_msg.addr, entry, tbe);
         } else if (in_msg.Type == CoherenceRequestType:RdBlkS) {
           trigger(Event:RdBlkS, in_msg.addr, entry, tbe);
@@ -986,6 +1058,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
+  action(te_allocateTBEForEviction, "te", desc="allocate TBE Entry") {
+    check_allocate(TBEs);
+    TBEs.allocate(address);
+    set_tbe(TBEs.lookup(address));
+      tbe.writeMask.clear();
+      tbe.wtData := false;
+      tbe.atomicData := false;
+      tbe.Dirty := false;
+      tbe.NumPendingAcks := 0;
+  }
+
+
   action(f_writeFlushDataToMemory, "f", desc="Write flush data to memory") {
     peek(requestNetwork_in, CPURequestMsg) {
       enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
@@ -1429,6 +1513,128 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
+  action(apf_allocateProbeFilterEntry, "apf", desc="Allocate probe filte entry") {
+    if (!ProbeFilterMemory.isTagPresent(address)) {
+        if (inclusiveDir) {
+            assert(ProbeFilterMemory.cacheAvail(address));
+        } else if (ProbeFilterMemory.cacheAvail(address) == false) {
+          Addr victim := ProbeFilterMemory.cacheProbe(address);
+          ProbeFilterMemory.deallocate(victim);
+        }
+        assert(ProbeFilterMemory.cacheAvail(address));
+        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
+        APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry");
+        entry.pfState := ProbeFilterState:NT;
+        if (inclusiveDir) {
+          entry.pfState := ProbeFilterState:T;
+        }
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+    }
+  }
+
+  action(mpfe_markPFEntryForEviction, "mpfe", desc="Mark this PF entry is being evicted") {
+    assert(ProbeFilterMemory.isTagPresent(address));
+    CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+    entry.pfState := ProbeFilterState:B;
+    peek(requestNetwork_in, CPURequestMsg) {
+      tbe.demandAddress := in_msg.addr;
+    }
+  }
+
+  action(we_wakeUpEvictionDependents, "we", desc="Wake up requests waiting for demand address and victim address") {
+    wakeUpBuffers(address);
+    wakeUpBuffers(tbe.demandAddress);
+  }
+
+  action(dpf_deallocateProbeFilter, "dpf", desc="deallocate PF entry") {
+    assert(ProbeFilterMemory.isTagPresent(address));
+    ProbeFilterMemory.deallocate(address);
+  }
+
+  action(upf_updateProbeFilter, "upf", desc="") {
+    peek(requestNetwork_in, CPURequestMsg) {
+      assert(ProbeFilterMemory.isTagPresent(address));
+      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+      if (in_msg.Type == CoherenceRequestType:WriteThrough) {
+        entry.pfState := ProbeFilterState:T;
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+      } else if (in_msg.Type == CoherenceRequestType:Atomic) {
+        entry.pfState := ProbeFilterState:T;
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+      } else if (in_msg.Type == CoherenceRequestType:RdBlkM) {
+        entry.pfState := ProbeFilterState:T;
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+      } else if (in_msg.Type == CoherenceRequestType:CtoD) {
+        entry.pfState := ProbeFilterState:T;
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+      }
+      if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
+        entry.isOnCPU := true;
+      } else {
+        entry.isOnGPU := true;
+      }
+    }
+  }
+
+  action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
+    peek(requestNetwork_in, CPURequestMsg) {
+      if (ProbeFilterMemory.isTagPresent(address)) {
+        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+        if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {//CorePair has inclusive L2
+            entry.isOnCPU := false;
+        }
+      }
+    }
+  }
+
+  action(sm_setMRU, "sm", desc="set probe filter entry as MRU") {                                       
+    ProbeFilterMemory.setMRU(address);
+  }
+
+
+  action(bp_backProbe, "bp", desc="back probe") {
+    enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
+      out_msg.addr := address;
+      NetDest probe_dests;
+      out_msg.Type := ProbeRequestType:PrbInv;
+      out_msg.ReturnData := true;
+      out_msg.MessageSize := MessageSizeType:Control;
+      if(isCPUSharer(address)) {
+        // won't be realistic for multisocket
+        out_msg.Destination.broadcast(MachineType:CorePair);
+      }
+      // add relevant TCC node to the list. This replaces all TCPs and SQCs
+      if(isGPUSharer(address)) {
+        if (noTCCdir) {
+          //Don't need to notify TCC about reads
+        } else {
+          probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
+                                            TCC_select_low_bit,                                         
+                                            TCC_select_num_bits));
+          tbe.NumPendingAcks := tbe.NumPendingAcks + 1;
+        }
+      }
+      tbe.NumPendingAcks := out_msg.Destination.count();
+      if (tbe.NumPendingAcks == 0) {
+        enqueue(triggerQueue_out, TriggerMsg, 1) {
+          out_msg.addr := address;
+          out_msg.Type := TriggerType:AcksComplete;
+        }
+      }
+      DPRINTF(RubySlicc, "%s\n", (out_msg));
+      APPEND_TRANSITION_COMMENT(" sc: Acks remaining: ");
+      APPEND_TRANSITION_COMMENT(tbe.NumPendingAcks);
+      APPEND_TRANSITION_COMMENT(" - back probe");
+      tbe.ProbeRequestStartTime := curCycle();
+    }
+  }
+
+
   action(sf_setForwardReqTime, "sf", desc="...") {
     tbe.ForwardRequestTime := curCycle();
   }
@@ -1513,6 +1719,14 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   // transitions from U
+  transition(U, PF_Repl, B_P) {PFTagArrayRead, PFTagArrayWrite}{
+    te_allocateTBEForEviction;
+    apf_allocateProbeFilterEntry;
+    bp_backProbe;
+    sm_setMRU;
+    mpfe_markPFEntryForEviction;
+  }
+
   transition(U, DmaRead, BDR_PM) {L3TagArrayRead} {
     atd_allocateTBEforDMA;
     qdr_queueDmaRdReq;
@@ -1523,12 +1737,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   transition(U, {RdBlkS}, BS_PM) {L3TagArrayRead} {
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     l_queueMemRdReq;
     pr_profileL3HitMiss; //Must come after l_queueMemRdReq
     sc_probeShrCoreData;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
+  // TODO: Need to apply probeFilter changes in DMA too!!
   transition(U, DmaWrite, BDW_PM) {L3TagArrayRead} {
     atd_allocateTBEforDMA;
     qdr_queueDmaRdReq;
@@ -1539,52 +1757,69 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   transition(U, WriteThrough, BM_PM) {L3TagArrayRead, L3TagArrayWrite} {
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     w_sendResponseWBAck;
     l_queueMemRdReq;
     pr_profileL3HitMiss; //Must come after l_queueMemRdReq
     dc_probeInvCoreData;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
   transition(U, Atomic, BM_PM) {L3TagArrayRead, L3TagArrayWrite} {
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     l_queueMemRdReq;
     pr_profileL3HitMiss; //Must come after l_queueMemRdReq
     dc_probeInvCoreData;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
   transition(U, {RdBlkM}, BM_PM) {L3TagArrayRead} {
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     l_queueMemRdReq;
     pr_profileL3HitMiss; //Must come after l_queueMemRdReq
     dc_probeInvCoreData;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
   transition(U, RdBlk, B_PM) {L3TagArrayRead}{
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     l_queueMemRdReq;
     pr_profileL3HitMiss; //Must come after l_queueMemRdReq
     sc_probeShrCoreData;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
   transition(U, CtoD, BP) {L3TagArrayRead} {
     t_allocateTBE;
+    apf_allocateProbeFilterEntry;
     ic_probeInvCore;
+    sm_setMRU;
+    upf_updateProbeFilter;
     p_popRequestQueue;
   }
 
   transition(U, VicDirty, BL) {L3TagArrayRead} {
     t_allocateTBE;
     w_sendResponseWBAck;
+    rmcd_removeSharerConditional;
     p_popRequestQueue;
   }
 
   transition(U, VicClean, BL) {L3TagArrayRead} {
     t_allocateTBE;
     w_sendResponseWBAck;
+    rmcd_removeSharerConditional;
     p_popRequestQueue;
   }
 
@@ -1831,6 +2066,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     wd_writeBackData;
     es_sendResponseES;
     alwt_allocateL3BlockOnWT;
+    dt_deallocateTBE;
+    pt_popTriggerQueue;
+  }
+
+  transition(B_P, ProbeAcksComplete, U) {
+    wd_writeBackData;
+    alwt_allocateL3BlockOnWT;
+    we_wakeUpEvictionDependents;
+    dpf_deallocateProbeFilter;
     dt_deallocateTBE;
     pt_popTriggerQueue;
   }

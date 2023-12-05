@@ -630,7 +630,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.LastSender := entry.LastSender;
         tbe.L3Hit := true;
         tbe.MemData := true;
-        L3CacheMemory.deallocate(address);
+        L3CacheMemory.deallocate(address); // this is to maintain exclusivity
       } else {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
           out_msg.addr := address;
@@ -1005,11 +1005,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(apf_allocateProbeFilterEntry, "apf", desc="Allocate probe filte entry") {
     if (!ProbeFilterMemory.isTagPresent(address)) {
-        if (inclusiveDir) {
-            assert(ProbeFilterMemory.cacheAvail(address));
+        if (inclusiveDir) { 
+          // could this assertion fail?
+          assert(ProbeFilterMemory.cacheAvail(address));
         } else if (ProbeFilterMemory.cacheAvail(address) == false) {
           Addr victim := ProbeFilterMemory.cacheProbe(address);
-          ProbeFilterMemory.deallocate(victim);
+          ProbeFilterMemory.deallocate(victim); // not intimating the L2s breaks inclusivity, hence non-inclusive
         }
         assert(ProbeFilterMemory.cacheAvail(address));
         CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
@@ -1021,6 +1022,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         entry.isOnCPU := false;
         entry.isOnGPU := false;
     }
+    // TODO otherwise doing nothing -- wouldn't the following event overwrite state in that case?
   }
 
   action(mpfe_markPFEntryForEviction, "mpfe", desc="Mark this PF entry is being evicted") {
@@ -1046,19 +1048,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     peek(requestNetwork_in, CPURequestMsg) {
       assert(ProbeFilterMemory.isTagPresent(address));
       CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-      if (in_msg.Type == CoherenceRequestType:WriteThrough) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:Atomic) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:RdBlkM) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:CtoD) {
+      if (in_msg.Type == CoherenceRequestType:WriteThrough
+          || in_msg.Type == CoherenceRequestType:Atomic
+          || in_msg.Type == CoherenceRequestType:RdBlkM
+          || in_msg.Type == CoherenceRequestType:CtoD) {
         entry.pfState := ProbeFilterState:T;
         entry.isOnCPU := false;
         entry.isOnGPU := false;
