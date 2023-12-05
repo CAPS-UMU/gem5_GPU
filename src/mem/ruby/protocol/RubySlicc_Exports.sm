@@ -77,6 +77,7 @@ structure(DataBlock, external = "yes", desc="..."){
   void copyPartial(DataBlock, int, int);
   void copyPartial(DataBlock, WriteMask);
   void atomicPartial(DataBlock, WriteMask);
+  void atomicPartial(DataBlock, WriteMask, bool);
   int numAtomicLogEntries();
   void clearAtomicLogEntries();
 }
@@ -230,11 +231,13 @@ enumeration(CacheRequestType, desc="...", default="CacheRequestType_NULL") {
   DataArrayWrite,   desc="Write access to the cache's data array";
   TagArrayRead,     desc="Read access to the cache's tag array";
   TagArrayWrite,    desc="Write access to the cache's tag array";
+  AtomicALUOperation,  desc="Atomic ALU operation";
 }
 
 enumeration(CacheResourceType, desc="...", default="CacheResourceType_NULL") {
   DataArray,    desc="Access to the cache's data array";
   TagArray,     desc="Access to the cache's tag array";
+  AtomicALUArray, desc="Access to the cache's atomic ALU array";
 }
 
 enumeration(DirectoryRequestType, desc="...", default="DirectoryRequestType_NULL") {
