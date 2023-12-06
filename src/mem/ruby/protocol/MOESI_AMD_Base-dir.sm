@@ -676,14 +676,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.LastSender := entry.LastSender;
         tbe.L3Hit := true;
         tbe.MemData := true;
-        /*  TODO Deallocating the cache entry here necessitates reallocating once
-         *  transaction completes. It is unclear why it is done this way.
-         *  Since the TBE is maintained independently to the entry, and since
-         *  probes and memory responses reconcile at the TBE, it is safe to
-         *  maintain the L3 line until transaction completion.
-         *  Perhaps the entry is merely a placeholder that is shared between requests intermittently?
-         */
-        L3CacheMemory.deallocate(address);
+        L3CacheMemory.deallocate(address); // to maintain exclusivity
       } else {
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
           out_msg.addr := address;
@@ -1103,6 +1096,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       tbe.TBEState := State:B_PM;
       if (in_msg.Type == CoherenceRequestType:WriteThrough ||
           in_msg.Type == CoherenceRequestType:Atomic ||
+          in_msg.Type == CoherenceRequestType:AtomicReturn ||
+          in_msg.Type == CoherenceRequestType:AtomicNoReturn ||
           in_msg.Type == CoherenceRequestType:RdBlkM) {
         tbe.TBEState := State:BM_PM;
       } else if (in_msg.Type == CoherenceRequestType:RdBlkS) {
@@ -1115,6 +1110,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       } else { //if (in_msg.Type == CoherenceRequestType:Flush) {
         tbe.TBEState := State:F;
       }
+      tbe.responded := false;
+      tbe.readyToResp := false;
     }
   }
 
@@ -1214,6 +1211,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(edc_earlyDataToCore, "edc", desc="early data to core") {
     if(tbe.readyToResp && !tbe.responded) {
+      DPRINTF(OPT1, "Early: ReadyToResp; tbe.TBEState %d (==? %d %d)\n", tbe.TBEState, State:BM_PM, State:BM_Pm);
       if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
         DPRINTF(OPT1, "Early: Responding to RdBlkM/WT/Atomic at %d probes\n", tbe.NumPendingAcks);
         /* this would otherwise have been done before
@@ -1221,7 +1219,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
          * since we are skipping that part now, we need to do that here
          */
         if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
-          tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask);
+          if (tbe.atomicDataReturn) {
+            tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
+          } else {
+            assert(tbe.atomicDataNoReturn);
+            tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, true);
+          }
         }
 
         if (tbe.wtData) {
@@ -1557,9 +1560,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     wada_wakeUpAllDependentsAddr) to put the pending requests to sleep instead of
     them causing head of line blocking -- wada_wakeUpAllDependentsAddr should wake
     the request up once the request preventing it from completing is done.
+  */
   action(z_stall, "z", desc="...") {
   }
-  */
 
   // TRANSITIONS
   transition({BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, {RdBlkS, RdBlkM, RdBlk, CtoD}) {
@@ -1687,7 +1690,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   // there is now a new possibility of core unblocking before all probes/memory is read
   transition({BM_M, BM_PM, BM_Pm, BS_M, BS_PM, BS_Pm, B_M, B_PM, B_Pm}, CoreUnblock) {
-    st_stallAndWaitRequest;
+    z_stall;
   }
 
   transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, WBAck) {
