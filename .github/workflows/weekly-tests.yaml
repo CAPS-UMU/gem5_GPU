@@ -59,7 +59,7 @@ jobs:
             - run: chmod u+x build/ALL/gem5.opt
             - name: very-long ${{ matrix.test-type }}
               working-directory: ${{ github.workspace }}/tests
-              run: ./main.py run gem5/${{ matrix.test-type }} --length very-long --skip-build -vv -t $(nproc)
+              run: ./main.py run gem5/${{ matrix.test-type }} --length very-long --skip-build -vv
             - name: create zip of results
               if: success() || failure()
               run: |
@@ -89,11 +89,7 @@ jobs:
 
             - name: Checkout DRAMSys
               working-directory: ${{ github.workspace }}/ext/dramsys
-              run: |
-                  git clone https://github.com/tukl-msd/DRAMSys DRAMSys
-                  cd DRAMSys
-                  git checkout -b gem5 09f6dcbb91351e6ee7cadfc7bc8b29d97625db8f
-                  git submodule update --init --recursive
+              run: git clone https://github.com/tukl-msd/DRAMSys --branch v5.0 --depth 1 DRAMSys
 
       # gem5 is built separately because it depends on the DRAMSys library
             - name: Build gem5

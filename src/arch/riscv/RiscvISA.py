@@ -13,6 +13,7 @@
 #
 # Copyright (c) 2016 RISC-V Foundation
 # Copyright (c) 2016 The University of Virginia
+# Copyright (c) 2023 The Regents of the University of California
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -38,9 +39,12 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from m5.params import Enum, UInt32
-from m5.params import Param
 from m5.objects.BaseISA import BaseISA
+from m5.params import (
+    Enum,
+    Param,
+    UInt32,
+)
 
 
 class RiscvVectorLength(UInt32):
@@ -73,6 +77,16 @@ class RiscvType(Enum):
     vals = ["RV32", "RV64"]
 
 
+class PrivilegeModeSet(Enum):
+    vals = [
+        "M",  # Machine privilege mode only
+        "MU",  # Machine and user privlege modes implemented
+        "MNU",  # MU privilege modes with user-mode trap
+        "MSU",  # Machine, supervisor and user modes implemented
+        "MNSU",  # MSU privilege modes with user-mode trap
+    ]
+
+
 class RiscvISA(BaseISA):
     type = "RiscvISA"
     cxx_class = "gem5::RiscvISA::ISA"
@@ -94,3 +108,39 @@ class RiscvISA(BaseISA):
         "Length of each vector element in bits. \
         ELEN in Ch. 2 of RISC-V vector spec",
     )
+    privilege_mode_set = Param.PrivilegeModeSet(
+        "MSU",
+        "The combination of privilege modes \
+        in Privilege Levels section of RISC-V privileged spec",
+    )
+
+    enable_Zicbom_fs = Param.Bool(True, "Enable Zicbom extension in FS mode")
+    enable_Zicboz_fs = Param.Bool(True, "Enable Zicboz extension in FS mode")
+
+    def get_isa_string(self):
+        isa_extensions = []
+        # check for the base ISA type
+        if self.riscv_type.value == "RV32":
+            isa_extensions.append("rv32")
+        elif self.riscv_type.value == "RV64":
+            isa_extensions.append("rv64")
+        # use imafdc by default
+        isa_extensions.extend(["i", "m", "a", "f", "d", "c"])
+        # check for the vector extension
+        if self.enable_rvv.value == True:
+            isa_extensions.append("v")
+        isa_string = "".join(isa_extensions)
+
+        if self.enable_Zicbom_fs.value:
+            isa_string += "_Zicbom"  # Cache-block Management Instructions
+        if self.enable_Zicboz_fs.value:
+            isa_string += "_Zicboz"  # Cache-block Zero Instruction
+        isa_string += "_Zicntr"  # Performance Couter Spec
+        isa_string += "_Zicsr"  # RMW CSR Instructions (Privileged Spec)
+        isa_string += "_Zifencei"  # FENCE.I Instruction (Unprivileged Spec)
+        isa_string += "_Zihpm"  # Performance Couter Spec
+        isa_string += "_Zba"  # Address Generation
+        isa_string += "_Zbb"  # Basic Bit Manipulation
+        isa_string += "_Zbs"  # Single-bit Instructions
+
+        return isa_string

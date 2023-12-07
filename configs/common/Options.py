@@ -38,12 +38,17 @@
 
 import argparse
 
+from common import (
+    CpuConfig,
+    ObjectList,
+)
+from common.Benchmarks import *
+
 import m5
 from m5.defines import buildEnv
 from m5.objects import *
 
-from common.Benchmarks import *
-from common import ObjectList
+from gem5.runtime import get_supported_isas
 
 vio_9p_help = """\
 Enable the Virtio 9P device and set the path to share. The default 9p path is
@@ -240,6 +245,7 @@ def addNoISAOptions(parser):
 def addCommonOptions(parser):
     # start by adding the base options that do not assume an ISA
     addNoISAOptions(parser)
+    isa = list(get_supported_isas())[0]
 
     # system options
     parser.add_argument(
@@ -250,7 +256,7 @@ def addCommonOptions(parser):
     )
     parser.add_argument(
         "--cpu-type",
-        default="AtomicSimpleCPU",
+        default=CpuConfig.isa_string_map[isa] + "AtomicSimpleCPU",
         choices=ObjectList.cpu_list.get_names(),
         help="type of cpu to run with",
     )
@@ -581,7 +587,7 @@ def addCommonOptions(parser):
     parser.add_argument(
         "--restore-with-cpu",
         action="store",
-        default="AtomicSimpleCPU",
+        default=CpuConfig.isa_string_map[isa] + "AtomicSimpleCPU",
         choices=ObjectList.cpu_list.get_names(),
         help="cpu type for restoring from a checkpoint",
     )
