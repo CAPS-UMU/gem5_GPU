@@ -344,37 +344,22 @@ class L3Cache(RubyCache):
         self.resourceStalls = False
         self.replacement_policy = TreePLRURP()
 
+class DirCache(RubyCache):
+    dataArrayBanks = 2
+    tagArrayBanks = 16
 
-# unused in GPU_VIPER; see git blame for discussion
-class L3Cntrl(L3Cache_Controller, CntrlBase):
     def create(self, options, ruby_system, system):
-        self.version = self.versionCount()
-        self.L3cache = L3Cache()
-        self.L3cache.create(options, ruby_system, system)
-
-        self.l3_response_latency = max(
-            self.L3cache.dataAccessLatency, self.L3cache.tagAccessLatency
-        )
-        self.ruby_system = ruby_system
-
-        if options.recycle_latency:
-            self.recycle_latency = options.recycle_latency
-
-    def connectWireBuffers(
-        self,
-        req_to_dir,
-        resp_to_dir,
-        l3_unblock_to_dir,
-        req_to_l3,
-        probe_to_l3,
-        resp_to_l3,
-    ):
-        self.reqToDir = req_to_dir
-        self.respToDir = resp_to_dir
-        self.l3UnblockToDir = l3_unblock_to_dir
-        self.reqToL3 = req_to_l3
-        self.probeToL3 = probe_to_l3
-        self.respToL3 = resp_to_l3
+        self.size = MemorySize(options.l3_size) # L3 size includes width
+        self.size.value /= options.num_dirs
+        self.assoc = options.l3_assoc
+        self.dataArrayBanks /= options.num_dirs
+        self.tagArrayBanks /= options.num_dirs
+        self.dataArrayBanks /= options.num_dirs
+        self.tagArrayBanks /= options.num_dirs
+        self.dataAccessLatency = options.l3_data_latency / 2 # TODO perhaps a lower value?
+        self.tagAccessLatency = options.l3_tag_latency if options.l3_tag_latency == 1 else 1
+        self.resourceStalls = False
+        self.replacement_policy = TreePLRURP() # TODO consider carefully
 
 
 class DirCntrl(Directory_Controller, CntrlBase):
@@ -388,6 +373,9 @@ class DirCntrl(Directory_Controller, CntrlBase):
 
         self.L3CacheMemory = L3Cache()
         self.L3CacheMemory.create(options, ruby_system, system)
+
+        self.ProbeFilterMemory = DirCache()
+        self.ProbeFilterMemory.create(options, ruby_system, system)
 
         self.l3_hit_latency = max(
             self.L3CacheMemory.dataAccessLatency,
