@@ -48,7 +48,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   bool GPUonly := "False";
   int TCC_select_num_bits;
   bool useL3OnWT := "False";
-  bool noWBCleanVictims := "False";
+  bool earlyDataToCore := "True"; //opt1
+  bool noWBCleanVictimsToMem := "True"; //opt2 (bugfix)
+  bool wbLLC := "True"; //opt3
+  bool noWBCleanVictimsToLLC := "False"; //opt3_5
+  bool ownerTracking := "True"; //opt4
+  bool sharerTracking := "False"; //opt5 (enhancement on opt4)
   bool L2isWB;
   bool inclusiveDir := "True";
   Cycles to_memory_controller_latency := 1;
@@ -467,7 +472,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       peek(requestNetwork_in, CPURequestMsg) {
         TBE tbe := TBEs.lookup(in_msg.addr);
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(in_msg.addr));
-        if (inclusiveDir && isNotPresentProbeFilter(in_msg.addr)) {
+        if (ownerTracking && inclusiveDir && isNotPresentProbeFilter(in_msg.addr)) {
             Addr victim := ProbeFilterMemory.cacheProbe(in_msg.addr);
             tbe := TBEs.lookup(victim);
             entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(victim));
@@ -531,7 +536,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(s_sendResponseS, "s", desc="send Shared response") {
-    if(!tbe.responded) {
+    if(earlyDataToCore && !tbe.responded || !earlyDataToCore) {
       DPRINTF(OPT1, "NotEarly: Responding to RdBlkS\n");
       enqueue(responseNetwork_out, ResponseMsg, response_latency) {
         out_msg.addr := address;
@@ -558,7 +563,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(es_sendResponseES, "es", desc="send Exclusive or Shared response") {
-    if(!tbe.responded) {
+    if(earlyDataToCore && !tbe.responded || !earlyDataToCore) {
       DPRINTF(OPT1, "NotEarly: Responding to RdBlk\n");
       enqueue(responseNetwork_out, ResponseMsg, response_latency) {
         out_msg.addr := address;
@@ -593,7 +598,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(m_sendResponseM, "m", desc="send Modified response") {
-    if(!tbe.responded) {
+    if(earlyDataToCore && !tbe.responded || !earlyDataToCore) {
       DPRINTF(OPT1, "NotEarly: Responding to RdBlkM\n");
       if (tbe.wtData) {
         enqueue(triggerQueue_out, TriggerMsg, 1) {
@@ -637,6 +642,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
+  // this action is not actively used currently
   action(c_sendResponseCtoD, "c", desc="send CtoD Ack") {
     enqueue(responseNetwork_out, ResponseMsg, response_latency) {
       out_msg.addr := address;
@@ -1181,8 +1187,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.TBEState := State:BL;
       } else if (in_msg.Type == CoherenceRequestType:WriteFlush) {
         tbe.TBEState := State:F;
-      } else { // TODO condition for PF_Repl
+      } else if (ownerTracking) { // TODO condition for PF_Repl
         tbe.TBEState := State:B_P;
+      } else {
+        DPRINTF(RubySlicc, "Error: Incomplete switch\n");
       }
       tbe.responded := false;
       tbe.readyToResp := false;
@@ -1199,7 +1207,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
      *  which can be due to dirty probe responses received -- which
      *  indicates that a previous owner has relinquished the dirty line
      */
-    if (tbe.wtData || tbe.atomicData || tbe.Dirty) {
+    if (tbe.wtData || tbe.atomicData || 
+         (tbe.Dirty && noWBCleanVictimsToMem || !noWBCleanVictimsToMem && (tbe.Dirty == false))) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
       if(!tbe.responded) { 
@@ -1284,120 +1293,122 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(edc_earlyDataToCore, "edc", desc="early data to core") {
-    if(tbe.readyToResp && !tbe.responded && !(tbe.TBEState == State:B_P)) {
-      DPRINTF(OPT1, "Early: ReadyToResp; tbe.TBEState %d (==? %d %d)\n", tbe.TBEState, State:BM_PM, State:BM_Pm);
-      if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
-        DPRINTF(OPT1, "Early: Responding to RdBlkM/WT/Atomic at %d probes\n", tbe.NumPendingAcks);
-        /* this would otherwise have been done before
-         * responding to the core, as part of writing back to memory
-         * since we are skipping that part now, we need to do that here
-         */
-        if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
-          if (tbe.atomicDataReturn) {
-            tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
-          } else {
-            assert(tbe.atomicDataNoReturn);
-            tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, true);
+    if(earlyDataToCore) {
+      if(tbe.readyToResp && !tbe.responded && !(tbe.TBEState == State:B_P)) {
+        DPRINTF(OPT1, "Early: ReadyToResp; tbe.TBEState %d (==? %d %d)\n", tbe.TBEState, State:BM_PM, State:BM_Pm);
+        if (tbe.TBEState == State:BM_PM || tbe.TBEState == State:BM_Pm) {
+          DPRINTF(OPT1, "Early: Responding to RdBlkM/WT/Atomic at %d probes\n", tbe.NumPendingAcks);
+          /* this would otherwise have been done before
+           * responding to the core, as part of writing back to memory
+           * since we are skipping that part now, we need to do that here
+           */
+          if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
+            if (tbe.atomicDataReturn) {
+              tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
+            } else {
+              assert(tbe.atomicDataNoReturn);
+              tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, true);
+            }
           }
-        }
 
-        if (tbe.wtData) {
-          enqueue(triggerQueue_out, TriggerMsg, 1) {
-            out_msg.addr := address;
-            out_msg.Type := TriggerType:UnblockWriteThrough;
+          if (tbe.wtData) {
+            enqueue(triggerQueue_out, TriggerMsg, 1) {
+              out_msg.addr := address;
+              out_msg.Type := TriggerType:UnblockWriteThrough;
+            }
+          } else {
+            enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+              out_msg.addr := address;
+              out_msg.Type := CoherenceResponseType:NBSysResp;
+              if (tbe.L3Hit) {
+                out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+              } else {
+                out_msg.Sender := machineID; // TODO memory (L3 miss)
+              }
+              out_msg.Destination.add(tbe.OriginalRequestor);
+              out_msg.DataBlk := tbe.DataBlk;
+              out_msg.MessageSize := MessageSizeType:Response_Data;
+              out_msg.Dirty := tbe.Dirty;
+              out_msg.State := CoherenceState:Modified;
+              out_msg.CtoD := false;
+              out_msg.InitialRequestTime := tbe.InitialRequestTime;
+              out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+              out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+              out_msg.OriginalResponder := tbe.LastSender;
+              out_msg.isGLCSet := tbe.isGLCSet;
+              out_msg.isSLCSet := tbe.isSLCSet;
+              if(tbe.atomicData){
+                out_msg.CURequestor := tbe.CURequestor;
+              }
+              out_msg.L3Hit := tbe.L3Hit;
+              DPRINTF(RubySlicc, "%s\n", out_msg);
+            }
+            if (tbe.atomicData) {
+              enqueue(triggerQueue_out, TriggerMsg, 1) {
+                out_msg.addr := address;
+                out_msg.Type := TriggerType:UnblockWriteThrough;
+              }
+            }
           }
-        } else {
+        } else if (tbe.TBEState == State:BS_PM || tbe.TBEState == State:BS_Pm) {
+          DPRINTF(OPT1, "Early: Responding to RdBlkS at %d probes\n", tbe.NumPendingAcks);
           enqueue(responseNetwork_out, ResponseMsg, response_latency) {
             out_msg.addr := address;
             out_msg.Type := CoherenceResponseType:NBSysResp;
             if (tbe.L3Hit) {
               out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
             } else {
-              out_msg.Sender := machineID; // TODO memory (L3 miss)
+              out_msg.Sender := machineID;
+            }
+            out_msg.Destination.add(tbe.OriginalRequestor);
+            out_msg.DataBlk := tbe.DataBlk;
+            out_msg.MessageSize := MessageSizeType:Response_Data;
+            out_msg.Dirty := false;
+            out_msg.State := CoherenceState:Shared;
+            out_msg.InitialRequestTime := tbe.InitialRequestTime;
+            out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
+            out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
+            out_msg.OriginalResponder := tbe.LastSender;
+            out_msg.L3Hit := tbe.L3Hit;
+            out_msg.CURequestor := tbe.CURequestor;
+            DPRINTF(RubySlicc, "%s\n", out_msg);
+          }
+        } else if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
+          DPRINTF(OPT1, "Early: Responding to RdBlk at %d probes\n", tbe.NumPendingAcks);
+          enqueue(responseNetwork_out, ResponseMsg, response_latency) {
+            out_msg.addr := address;
+            out_msg.Type := CoherenceResponseType:NBSysResp;
+            if (tbe.L3Hit) {
+              out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
+            } else {
+              out_msg.Sender := machineID;
             }
             out_msg.Destination.add(tbe.OriginalRequestor);
             out_msg.DataBlk := tbe.DataBlk;
             out_msg.MessageSize := MessageSizeType:Response_Data;
             out_msg.Dirty := tbe.Dirty;
-            out_msg.State := CoherenceState:Modified;
-            out_msg.CtoD := false;
+            // this is ignored by GPU
+            if (tbe.Cached) {
+              out_msg.State := CoherenceState:Shared;
+            } else {
+              out_msg.State := CoherenceState:Exclusive;
+            }
             out_msg.InitialRequestTime := tbe.InitialRequestTime;
             out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
             out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
             out_msg.OriginalResponder := tbe.LastSender;
+            out_msg.L3Hit := tbe.L3Hit;
             out_msg.isGLCSet := tbe.isGLCSet;
             out_msg.isSLCSet := tbe.isSLCSet;
-            if(tbe.atomicData){
-              out_msg.CURequestor := tbe.CURequestor;
-            }
-            out_msg.L3Hit := tbe.L3Hit;
+            out_msg.CURequestor := tbe.CURequestor;
             DPRINTF(RubySlicc, "%s\n", out_msg);
           }
-          if (tbe.atomicData) {
-            enqueue(triggerQueue_out, TriggerMsg, 1) {
-              out_msg.addr := address;
-              out_msg.Type := TriggerType:UnblockWriteThrough;
-            }
-          }
-        }
-      } else if (tbe.TBEState == State:BS_PM || tbe.TBEState == State:BS_Pm) {
-        DPRINTF(OPT1, "Early: Responding to RdBlkS at %d probes\n", tbe.NumPendingAcks);
-        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-          out_msg.addr := address;
-          out_msg.Type := CoherenceResponseType:NBSysResp;
-          if (tbe.L3Hit) {
-            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
-          } else {
-            out_msg.Sender := machineID;
-          }
-          out_msg.Destination.add(tbe.OriginalRequestor);
-          out_msg.DataBlk := tbe.DataBlk;
-          out_msg.MessageSize := MessageSizeType:Response_Data;
-          out_msg.Dirty := false;
-          out_msg.State := CoherenceState:Shared;
-          out_msg.InitialRequestTime := tbe.InitialRequestTime;
-          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
-          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-          out_msg.OriginalResponder := tbe.LastSender;
-          out_msg.L3Hit := tbe.L3Hit;
-          out_msg.CURequestor := tbe.CURequestor;
-          DPRINTF(RubySlicc, "%s\n", out_msg);
-        }
-      } else if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
-        DPRINTF(OPT1, "Early: Responding to RdBlk at %d probes\n", tbe.NumPendingAcks);
-        enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-          out_msg.addr := address;
-          out_msg.Type := CoherenceResponseType:NBSysResp;
-          if (tbe.L3Hit) {
-            out_msg.Sender := createMachineID(MachineType:L3Cache, intToID(0));
-          } else {
-            out_msg.Sender := machineID;
-          }
-          out_msg.Destination.add(tbe.OriginalRequestor);
-          out_msg.DataBlk := tbe.DataBlk;
-          out_msg.MessageSize := MessageSizeType:Response_Data;
-          out_msg.Dirty := tbe.Dirty;
-          // this is ignored by GPU
-          if (tbe.Cached) {
-            out_msg.State := CoherenceState:Shared;
-          } else {
-            out_msg.State := CoherenceState:Exclusive;
-          }
-          out_msg.InitialRequestTime := tbe.InitialRequestTime;
-          out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
-          out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-          out_msg.OriginalResponder := tbe.LastSender;
-          out_msg.L3Hit := tbe.L3Hit;
-          out_msg.isGLCSet := tbe.isGLCSet;
-          out_msg.isSLCSet := tbe.isSLCSet;
-          out_msg.CURequestor := tbe.CURequestor;
-          DPRINTF(RubySlicc, "%s\n", out_msg);
+          tbe.responded := true;
         }
         tbe.responded := true;
+      } else {
+        DPRINTF(OPT1, "NotApplicable"); // usually for B_P (PF_Repl)
       }
-      tbe.responded := true;
-    } else {
-      DPRINTF(OPT1, "NotApplicable"); // usually for B_P (PF_Repl)
     }
   }
 
@@ -1447,7 +1458,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
      * worst case, if GPU ends up needing it, it would then have the dir fetch from mem
      */
     peek(responseNetwork_in, ResponseMsg) {
-      if (!noWBCleanVictims || (noWBCleanVictims && in_msg.Dirty)) {
+      if (!noWBCleanVictimsToLLC || (noWBCleanVictimsToLLC && in_msg.Dirty)) {
         if (L3CacheMemory.isTagPresent(address)) {
           CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
           APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
@@ -1493,7 +1504,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.Dirty := true; // fresh entry, explicitify dirtiness
         }
         DPRINTF(OPT3, "L2DirtyVictimToL3\n");
-      } else { // never entered on !noWBCleanVictims
+      } else { // never entered on !noWBCleanVictimsToLLC
         DPRINTF(OPT3, "NoL2CleanVictimToL3\n");
         // TODO how to capture the consequential read misses?
       }
@@ -1562,22 +1573,24 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(apf_allocateProbeFilterEntry, "apf", desc="Allocate probe filte entry") {
-    if (!ProbeFilterMemory.isTagPresent(address)) {
-        if (inclusiveDir) {
-            assert(ProbeFilterMemory.cacheAvail(address));
-        } else if (ProbeFilterMemory.cacheAvail(address) == false) {
-          Addr victim := ProbeFilterMemory.cacheProbe(address);
-          ProbeFilterMemory.deallocate(victim);
-        }
-        assert(ProbeFilterMemory.cacheAvail(address));
-        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
-        APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry");
-        entry.pfState := ProbeFilterState:NT;
-        if (inclusiveDir) {
-          entry.pfState := ProbeFilterState:T;
-        }
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
+    if(ownerTracking) {
+      if (!ProbeFilterMemory.isTagPresent(address)) {
+          if (inclusiveDir) {
+              assert(ProbeFilterMemory.cacheAvail(address));
+          } else if (ProbeFilterMemory.cacheAvail(address) == false) {
+            Addr victim := ProbeFilterMemory.cacheProbe(address);
+            ProbeFilterMemory.deallocate(victim);
+          }
+          assert(ProbeFilterMemory.cacheAvail(address));
+          CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
+          APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry");
+          entry.pfState := ProbeFilterState:NT;
+          if (inclusiveDir) {
+            entry.pfState := ProbeFilterState:T;
+          }
+          entry.isOnCPU := false;
+          entry.isOnGPU := false;
+      }
     }
   }
 
@@ -1601,51 +1614,59 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(upf_updateProbeFilter, "upf", desc="") {
-    peek(requestNetwork_in, CPURequestMsg) {
-      assert(ProbeFilterMemory.isTagPresent(address));
-      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-      if (in_msg.Type == CoherenceRequestType:WriteThrough) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:Atomic) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:RdBlkM) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      } else if (in_msg.Type == CoherenceRequestType:CtoD) {
-        entry.pfState := ProbeFilterState:T;
-        entry.isOnCPU := false;
-        entry.isOnGPU := false;
-      }
-      if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
-        entry.isOnCPU := true;
-      } else {
-        entry.isOnGPU := true;
-      }
-    }
-  }
-
-  action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
-    peek(requestNetwork_in, CPURequestMsg) {
-      if (ProbeFilterMemory.isTagPresent(address)) {
+    if (ownerTracking) {
+      peek(requestNetwork_in, CPURequestMsg) {
+        assert(ProbeFilterMemory.isTagPresent(address));
         CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-        if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {//CorePair has inclusive L2
-            entry.isOnCPU := false;
+        if (in_msg.Type == CoherenceRequestType:WriteThrough) {
+          entry.pfState := ProbeFilterState:T;
+          entry.isOnCPU := false;
+          entry.isOnGPU := false;
+        } else if (in_msg.Type == CoherenceRequestType:Atomic) {
+          entry.pfState := ProbeFilterState:T;
+          entry.isOnCPU := false;
+          entry.isOnGPU := false;
+        } else if (in_msg.Type == CoherenceRequestType:RdBlkM) {
+          entry.pfState := ProbeFilterState:T;
+          entry.isOnCPU := false;
+          entry.isOnGPU := false;
+        } else if (in_msg.Type == CoherenceRequestType:CtoD) {
+          entry.pfState := ProbeFilterState:T;
+          entry.isOnCPU := false;
+          entry.isOnGPU := false;
+        }
+        if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
+          entry.isOnCPU := true;
+        } else {
+          entry.isOnGPU := true;
         }
       }
     }
   }
 
-  action(sm_setMRU, "sm", desc="set probe filter entry as MRU") {                                       
-    ProbeFilterMemory.setMRU(address);
+  action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
+    if(ownerTracking) {
+      peek(requestNetwork_in, CPURequestMsg) {
+        if (ProbeFilterMemory.isTagPresent(address)) {
+          CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+          if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {//CorePair has inclusive L2
+              entry.isOnCPU := false;
+          }
+        }
+      }
+    }
   }
 
+  action(sm_setMRU, "sm", desc="set probe filter entry as MRU") {
+    if(ownerTracking) {
+      ProbeFilterMemory.setMRU(address);
+    }
+  }
 
+  // these are only relevent when PF_Repl is recognized as an event
+  // -- which is only true when ownerTracking is enabled
   action(bp_backProbe, "bp", desc="back probe") {
+    DPRINTF(OPT5, "BackProbe\n");
     enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
       out_msg.addr := address;
       NetDest probe_dests;
@@ -1724,7 +1745,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(rt_recycleTriggerQueue, "rt", desc="recycle trigger queue") {
-    triggerQueue_in.recycle(clockEdge(), cyclesToTicks(recycle_latency));
+    if(earlyDataToCore) {
+      triggerQueue_in.recycle(clockEdge(), cyclesToTicks(recycle_latency));
+    }
   }
 
   action(ptl_popTriggerQueue, "ptl", desc="pop L3 trigger queue") {
@@ -1873,6 +1896,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     p_popRequestQueue;
   }
 
+  // CtoD is not a recognized event; so this is dummy for now
   transition(U, CtoD, BP) {L3TagArrayRead} {
     t_allocateTBE;
     apf_allocateProbeFilterEntry;
@@ -1919,7 +1943,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     st_stallAndWaitRequest;
   }
 
-  /*  Sometimes, there is the possibility of getting a UnblockWriteThrough before ProbeAcksComplete
+  /*  Sometimes, there is the possibility of getting an UnblockWriteThrough before ProbeAcksComplete
    *  because now we might be early-responding. And so, for those cases, when we encounter a premature
    *  UnblockWriteThrough, we can't just stall -- we'd need to recycle it. So the ProbeAcksComplete
    *  gets visibility.
@@ -2147,6 +2171,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     pt_popTriggerQueue;
   }
 
+  // transition depends on whether B_P is reachable; 
+  //  -- yes if ownerTrackign is enabled
   transition(B_P, ProbeAcksComplete, U) {
     wd_writeBackData;
     alwt_allocateL3BlockOnWT;
@@ -2156,6 +2182,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     pt_popTriggerQueue;
   }
 
+  // this transition can never be active since BP is unreachable
   transition(BP, ProbeAcksComplete, B){L3TagArrayWrite, L3TagArrayWrite} {
     sf_setForwardReqTime;
     wd_writeBackData;

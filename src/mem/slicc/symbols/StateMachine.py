@@ -133,6 +133,8 @@ class StateMachine(Symbol):
         self.debug_flags.add("OPT1")
         self.debug_flags.add("OPT2")
         self.debug_flags.add("OPT3")
+        self.debug_flags.add("OPT4")
+        self.debug_flags.add("OPT5")
 
     def __repr__(self):
         return f"[StateMachine: {self.ident}]"
