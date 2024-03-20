@@ -40,7 +40,7 @@
 machine(MachineType:Directory, "AMD Baseline protocol")
 : DirectoryMemory * directory;
   CacheMemory * L3CacheMemory;
-  CacheMemory * ProbeFilterMemory;
+  CacheMemory * ProbeFilterMemory; // 8 times the associativity
   Cycles response_latency := 5;
   Cycles l3_hit_latency := 50;
   bool noTCCdir := "False";
@@ -55,7 +55,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   bool ownerTracking := "True"; //opt4
   bool sharerTracking := "False"; //opt5 (enhancement on opt4)
   bool L2isWB;
-  bool inclusiveDir := "True";
+  bool inclusiveDir := "False";
   Cycles to_memory_controller_latency := 1;
 
   // DMA
@@ -160,9 +160,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   // TYPES
 
-  enumeration(ProbeFilterState, desc="") {
-    T,  desc="Tracked";
-    NT, desc="Not tracked";
+  enumeration(ProbeFilterState, desc="") { // TODO should there be a default explicit?
+    T,  desc="Tracked"; // in the L2s
+    NT, desc="Not tracked"; // in the L2s, but maybe in LLC
     B, desc="Blocked, This entry is being replaced";
   }
 
@@ -253,6 +253,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   void functionalRead(Addr addr, Packet *pkt) {
+    DPRINTF(OPT1, "FunctionalRead at addr: 0x%x", addr);
     TBE tbe := TBEs.lookup(addr);
     if(is_valid(tbe)) {
       testAndRead(addr, tbe.DataBlk, pkt);
@@ -262,6 +263,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   int functionalWrite(Addr addr, Packet *pkt) {
+    DPRINTF(OPT1, "FunctionalWrite at addr: 0x%x", addr);
     int num_functional_writes := 0;
 
     TBE tbe := TBEs.lookup(addr);
@@ -472,7 +474,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       peek(requestNetwork_in, CPURequestMsg) {
         TBE tbe := TBEs.lookup(in_msg.addr);
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(in_msg.addr));
-        if (ownerTracking && inclusiveDir && isNotPresentProbeFilter(in_msg.addr)) {
+        if (ownerTracking && isNotPresentProbeFilter(in_msg.addr)) { // if neither tag present nor free line available
             Addr victim := ProbeFilterMemory.cacheProbe(in_msg.addr);
             tbe := TBEs.lookup(victim);
             entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(victim));
@@ -836,6 +838,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(dc_probeInvCoreData, "dc", desc="probe inv cores, return data") {
     peek(requestNetwork_in, CPURequestMsg) {
       NetDest probe_dests;
+      bool NT := false;
+      bool isOnGPU := false;
+      if(ownerTracking) {
+        CacheEntry entry := static_cast(CacheEntry, 
+            "pointer", ProbeFilterMemory.lookup(address));
+        NT := entry.pfState == ProbeFilterState:NT;
+        isOnGPU := entry.isOnGPU;
+      }
+
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
       //  CPUonly && !GPUonly -> Add CorePairs
@@ -844,11 +855,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       //                         if no write conflict
       if (CPUonly) {
         assert(!GPUonly);
-        probe_dests.broadcast(MachineType:CorePair);
+        if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
+          probe_dests.broadcast(MachineType:CorePair);
+        }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          probe_dests.broadcast(MachineType:CorePair);
+          if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
+            probe_dests.broadcast(MachineType:CorePair);
+          }
         }
 
         // CPU + GPU or GPU only system
@@ -858,17 +873,23 @@ machine(MachineType:Directory, "AMD Baseline protocol")
              in_msg.Type != CoherenceRequestType:AtomicNoReturn) ||
              !in_msg.NoWriteConflict) {
           if (noTCCdir) {
-            probe_dests.add(mapAddressToRange(address, MachineType:TCC,
+            if(!ownerTracking || ownerTracking && !NT && isOnGPU) {
+              probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+            }
           } else {
-            probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
+            if(!ownerTracking || ownerTracking && !NT && isOnGPU) {
+              probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+            }
           }
         }
       }
-      probe_dests.remove(in_msg.Requestor);
+      if(!ownerTracking || ownerTracking && NT) {
+        probe_dests.remove(in_msg.Requestor);
+      }
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -952,6 +973,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(sc_probeShrCoreData, "sc", desc="probe shared cores, return data") {
     peek(requestNetwork_in, CPURequestMsg) { // not the right network?
       NetDest probe_dests;
+      bool NT := false;
+      bool isOnGPU := false;
+      if(ownerTracking) {
+        CacheEntry entry := static_cast(CacheEntry, 
+            "pointer", ProbeFilterMemory.lookup(address));
+        NT := entry.pfState == ProbeFilterState:NT;
+        isOnGPU := entry.isOnGPU;
+      }
+
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
       //  CPUonly && !GPUonly -> Add CorePairs
@@ -959,22 +989,30 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
       if (CPUonly) {
         assert(!GPUonly);
-        probe_dests.broadcast(MachineType:CorePair);
+        if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
+          probe_dests.broadcast(MachineType:CorePair);
+        }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          probe_dests.broadcast(MachineType:CorePair);
+          if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
+            probe_dests.broadcast(MachineType:CorePair);
+          }
         }
 
         // CPU + GPU or GPU only system
         // We don't need to notify TCC about reads
         if (!noTCCdir) {
-          probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
+          if(!ownerTracking || ownerTracking && !NT && isOnGPU) {
+            probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+          }
         }
       }
-      probe_dests.remove(in_msg.Requestor);
+      if (!ownerTracking || ownerTracking && NT) {
+        probe_dests.remove(in_msg.Requestor);
+      }
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -1003,9 +1041,19 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
+  // Only used during CtoD which is never invoked!
   action(ic_probeInvCore, "ic", desc="probe invalidate core, no return data needed") {
     peek(requestNetwork_in, CPURequestMsg) { // not the right network?
       NetDest probe_dests;
+      bool NT := false;
+      bool isOnGPU := false;
+      if(ownerTracking) {
+        CacheEntry entry := static_cast(CacheEntry, 
+            "pointer", ProbeFilterMemory.lookup(address));
+        NT := entry.pfState == ProbeFilterState:NT;
+        isOnGPU := entry.isOnGPU;
+      }
+
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
       //  CPUonly && !GPUonly -> Add CorePairs
@@ -1013,25 +1061,35 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
       if (CPUonly) {
         assert(!GPUonly);
+        if (!ownerTracking || ownerTracking && !NT && !isOnGPU) {
         probe_dests.broadcast(MachineType:CorePair);
+        }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
+          if (!ownerTracking || ownerTracking && !NT && !isOnGPU) {
           probe_dests.broadcast(MachineType:CorePair);
+          }
         }
 
         // CPU + GPU or GPU only system
         if (noTCCdir) {
+          if (!ownerTracking || ownerTracking && !NT && isOnGPU) {
           probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+        }
         } else {
+          if (!ownerTracking || ownerTracking && !NT && isOnGPU) {
           probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+          }
         }
       }
-      probe_dests.remove(in_msg.Requestor);
+      if (!ownerTracking || ownerTracking && NT) {
+        probe_dests.remove(in_msg.Requestor);
+      }
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -1064,21 +1122,36 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     peek(responseNetwork_in, ResponseMsg) {
       // here too, memory write can be saved; only writeback to L3
       // this action is entirely just a stat recorder
-      if (in_msg.Dirty) {
-        // tbe.Dirty is gratuitous here, but functional writes may apply
-        // subsequent L3 write will still read dirtyness from in_msg
-        tbe.Dirty := true;
-        // TODO: If an intermediate GPU write has dirtied L3, would the
-        //      victim be written back without incorporating GPU's stuff?
-        //      The way it's done now, that's how it is
-      } else {
-        // have to update the TBE, too, because of how this
-        // directory deals with functional writes
-        // TODO gratuitous?
-        tbe.DataBlk := in_msg.DataBlk;
-        tbe.Dirty   := tbe.Dirty || in_msg.Dirty;
+      if (noWBCleanVictimsToMem) {
+        if (in_msg.Dirty) {
+          // tbe.Dirty is gratuitous here, but functional writes may apply
+          // subsequent L3 write will still read dirtyness from in_msg
+          tbe.Dirty := true;
+          // TODO: If an intermediate GPU write has dirtied L3, would the
+          //      victim be written back without incorporating GPU's stuff?
+          //      The way it's done now, that's how it is
+        } else {
+          // have to update the TBE, too, because of how this
+          // directory deals with functional writes
+          // TODO gratuitous?
+          tbe.DataBlk := in_msg.DataBlk;
+          tbe.Dirty   := tbe.Dirty || in_msg.Dirty; // tbe.Dirty is anyway false
+        }
+        DPRINTF(OPT2, "MemWrite saved; only L3 will be updated\n");
+      } else { // default
+        enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+          out_msg.addr := address;
+          out_msg.Type := MemoryRequestType:MEMORY_WB;
+          out_msg.Sender := machineID;
+          out_msg.MessageSize := MessageSizeType:Writeback_Data;
+          out_msg.DataBlk := in_msg.DataBlk;
+        }
+        if (tbe.Dirty == false) {
+            // have to update the TBE, too, because of how this
+            // directory deals with functional writes
+          tbe.DataBlk := in_msg.DataBlk;
+        }
       }
-      DPRINTF(OPT2, "MemWrite saved; only L3 will be updated\n");
     }
   }
 
@@ -1454,8 +1527,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
      * atomic variable, which is handled differently anyway. 
      * Even data that's evicted as an unintended consequence 
      * (like capacity-induced writeback) is also not readily evident if needed by the GPU
-     * best case, this saves an L3 write, and potentially a memory write, pollution
-     * worst case, if GPU ends up needing it, it would then have the dir fetch from mem
+     * best case, 
+          this saves an L3 write (significant energy in silicon) 
+          and potentially a memory write, 
+          less pollution, 
+          increased effective cache capacity
+     * worst case, 
+          if GPU ends up needing it, it would then have the dir fetch from mem
      */
     peek(responseNetwork_in, ResponseMsg) {
       if (!noWBCleanVictimsToLLC || (noWBCleanVictimsToLLC && in_msg.Dirty)) {
@@ -1467,8 +1545,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           // in case the entry is already dirty to begin with 
           // (due to a prior dirty write, not yet written back)
           // retain the dirty bit, even if this victim is clean
-          // TODO does the consistency model allow this?
+          // doesn't matter anyway since dataBlk is overwriting 
+          // TODO does the consistency model not care?
           entry.Dirty := true; // overrides dirtyness
+          // PS Dirty bit is in the entry, not TBE
+          // TODO entry.Dirty assigned true is conservative;
+          // there's potential for opt by assigning tbe.Dirty instead;
+          // however, I'm not sure if there could be intermediate dirty writes (by GPU?)
           assert(is_valid(tbe));
           //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
           //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
@@ -1480,7 +1563,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             Addr victim := L3CacheMemory.cacheProbe(address);
             CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                    L3CacheMemory.lookup(victim));
-            if (victim_entry.Dirty) {
+            if ((noWBCleanVictimsToLLC && victim_entry.Dirty) || !noWBCleanVictimsToLLC) {
               enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
                 out_msg.addr := victim;
                 out_msg.Type := MemoryRequestType:MEMORY_WB;
@@ -1503,9 +1586,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.LastSender := in_msg.Sender;
           entry.Dirty := true; // fresh entry, explicitify dirtiness
         }
-        DPRINTF(OPT3, "L2DirtyVictimToL3\n");
       } else { // never entered on !noWBCleanVictimsToLLC
-        DPRINTF(OPT3, "NoL2CleanVictimToL3\n");
+               // or if L2 is sending clean victim -- this case leads to lost lines, risky one
+        DPRINTF(OPT3, "L2CleanVictimToL3 not written\n");
         // TODO how to capture the consequential read misses?
       }
     }
@@ -1536,7 +1619,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           Addr victim := L3CacheMemory.cacheProbe(address);
           CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                  L3CacheMemory.lookup(victim));
-          if (victim_entry.Dirty) {
+          if (noWBCleanVictimsToMem && victim_entry.Dirty || !noWBCleanVictimsToMem) {
             /* This condition does not help improve performance since
              * we are not waiting for the WBAck from memory anyway
              * However, the memory traffic will be greatly reduced.
@@ -1573,23 +1656,28 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(apf_allocateProbeFilterEntry, "apf", desc="Allocate probe filte entry") {
+    // During PF_Repl event, the line being operated on corresponds to PF victim
+    // If servicing RdBlk*, ... to requested line
     if(ownerTracking) {
       if (!ProbeFilterMemory.isTagPresent(address)) {
-          if (inclusiveDir) {
-              assert(ProbeFilterMemory.cacheAvail(address));
-          } else if (ProbeFilterMemory.cacheAvail(address) == false) {
-            Addr victim := ProbeFilterMemory.cacheProbe(address);
-            ProbeFilterMemory.deallocate(victim);
-          }
-          assert(ProbeFilterMemory.cacheAvail(address));
-          CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
-          APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry");
-          entry.pfState := ProbeFilterState:NT;
-          if (inclusiveDir) {
-            entry.pfState := ProbeFilterState:T;
-          }
-          entry.isOnCPU := false;
-          entry.isOnGPU := false;
+        // PF_Repl cannot enter since tag (=PF victim) has to be present
+        // No tagMatch, but cacheAvail has to be true (yes, think carefully)
+        //              otherwise PF_Repl should have been called
+        assert(ProbeFilterMemory.cacheAvail(address));
+        DPRINTF(OPT4, "RdBlk* received and CacheAvail, so preallotting PF entry\n");
+        CacheEntry entry := static_cast(CacheEntry, 
+            "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
+        APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry");
+        entry.pfState := ProbeFilterState:NT;
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+            // will be updated on the return path of a line
+      } else {
+        /* TagMatch -- either for the victim during PF_Repl
+         *             or for RdBlkX/WT/Atomic during original request
+         * If there's a tagMatch, you need to probe, cause line in system
+         * So nothing special
+         */
       }
     }
   }
@@ -1630,10 +1718,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.pfState := ProbeFilterState:T;
           entry.isOnCPU := false;
           entry.isOnGPU := false;
-        } else if (in_msg.Type == CoherenceRequestType:CtoD) {
-          entry.pfState := ProbeFilterState:T;
-          entry.isOnCPU := false;
-          entry.isOnGPU := false;
+        //} else if (in_msg.Type == CoherenceRequestType:CtoD) {
+        //  entry.pfState := ProbeFilterState:T;
+        //  entry.isOnCPU := false;
+        //  entry.isOnGPU := false;
         }
         if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
           entry.isOnCPU := true;
@@ -1817,7 +1905,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   // transitions from U
   transition(U, PF_Repl, B_P) {PFTagArrayRead, PFTagArrayWrite}{
     te_allocateTBEForEviction;
-    apf_allocateProbeFilterEntry;
+    apf_allocateProbeFilterEntry; 
+      // gratuitous, will always be allocated since replacement was ordered
     bp_backProbe;
     sm_setMRU;
     mpfe_markPFEntryForEviction;
@@ -2096,7 +2185,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   transition({BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B_P, BP}, CPUPrbResp) {
     y_writeProbeDataToTBE;
-    edc_earlyDataToCore;
+    edc_earlyDataToCore; // NA for B_P, but can be applied TODO
     x_decrementAcks;
     o_checkForCompletion;
     pr_popResponseQueue;

@@ -345,19 +345,19 @@ class L3Cache(RubyCache):
         self.replacement_policy = TreePLRURP()
 
 class DirCache(RubyCache):
-    dataArrayBanks = 2
+    dataArrayBanks = 16
     tagArrayBanks = 16
 
     def create(self, options, ruby_system, system):
-        self.size = MemorySize(options.l3_size) # L3 size includes width
+        self.size = MemorySize(options.l3_size)
         self.size.value /= options.num_dirs
-        self.assoc = options.l3_assoc
+        self.assoc = str(int(options.l3_assoc)*8) # for 6 L2 caches
         self.dataArrayBanks /= options.num_dirs
         self.tagArrayBanks /= options.num_dirs
         self.dataArrayBanks /= options.num_dirs
         self.tagArrayBanks /= options.num_dirs
-        self.dataAccessLatency = options.l3_data_latency / 2 # TODO perhaps a lower value?
-        self.tagAccessLatency = options.l3_tag_latency if options.l3_tag_latency == 1 else 1
+        self.dataAccessLatency = options.l3_data_latency # /2 # TODO perhaps a lower value?
+        self.tagAccessLatency = options.l3_tag_latency # if options.l3_tag_latency == 1 else 1
         self.resourceStalls = False
         self.replacement_policy = TreePLRURP() # TODO consider carefully
 
@@ -446,6 +446,25 @@ def define_options(parser):
     parser.add_argument(
         "--WB_L2", action="store_true", default=False, help="writeback L2"
     )
+    parser.add_argument(
+        "--edc", action="store_true", default=False, help="early data to core"
+    )
+    parser.add_argument(
+        "--ncvm", action="store_true", default=False, help="no WB clean victim to memory"
+    )
+    parser.add_argument(
+        "--wbl", action="store_true", default=False, help="write-back LLC"
+    )
+    parser.add_argument(
+        "--ncvl", action="store_true", default=False, help="no WB clean victims to LLC"
+    )
+    parser.add_argument(
+        "--st", action="store_true", default=False, help="sharer tracking"
+    )
+    parser.add_argument(
+        "--ot", action="store_true", default=False, help="owner trakcing"
+    )
+
     parser.add_argument(
         "--TCP_latency",
         type=int,
@@ -563,7 +582,12 @@ def construct_dirs(options, system, ruby_system, network):
         dir_cntrl.create(options, dir_ranges, ruby_system, system)
         dir_cntrl.number_of_TBEs = options.num_tbes
         dir_cntrl.useL3OnWT = options.use_L3_on_WT
-        dir_cntrl.noWBCleanVictims = options.no_WB_clean_victims
+        dir_cntrl.earlyDataToCore = options.edc # opt1
+        dir_cntrl.noWBCleanVictimsToMem = options.ncvm # opt2 (bugfix)
+        dir_cntrl.wbLLC = options.wbl  # opt3
+        dir_cntrl.noWBCleanVictimsToLLC = options.ncvl # opt3_5
+        dir_cntrl.ownerTracking = options.ot # opt4
+        dir_cntrl.sharerTracking = options.st # opt5 (enhancement on opt4)
         dir_cntrl.L2isWB = options.WB_L2
         # the number_of_TBEs is inclusive of TBEs below
 
