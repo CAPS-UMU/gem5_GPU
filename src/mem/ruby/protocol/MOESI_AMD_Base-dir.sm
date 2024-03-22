@@ -897,9 +897,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
         }
       }
-      if(!ownerTracking || ownerTracking && NT) {
-        probe_dests.remove(in_msg.Requestor);
-      }
+      probe_dests.remove(in_msg.Requestor);
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -1026,9 +1024,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
         }
       }
-      if (!ownerTracking || ownerTracking && NT) {
-        probe_dests.remove(in_msg.Requestor);
-      }
+      probe_dests.remove(in_msg.Requestor);
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -1111,9 +1107,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
         }
       }
-      if (!ownerTracking || ownerTracking && NT) {
-        probe_dests.remove(in_msg.Requestor);
-      }
+      probe_dests.remove(in_msg.Requestor);
 
       if (probe_dests.count() > 0) {
         enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
@@ -1375,7 +1369,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           // double data is impossible
           if(tbe.atomicData == false && tbe.wtData == false) {
             assert(tbe.atomicDataReturn == false && tbe.atomicDataNoReturn == false);
-            DPRINTF(RubySlicc, "Got double data for %s from %s\n", address, in_msg.Sender);
+            DPRINTF(RubySlicc, "Got double data for 0x%x from %s\n", address, in_msg.Sender);
             assert(tbe.DataBlk == in_msg.DataBlk);  // in case of double data
           }
         } else {
@@ -1737,8 +1731,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         if (in_msg.Type == CoherenceRequestType:WriteThrough
             || in_msg.Type == CoherenceRequestType:Atomic
             || in_msg.Type == CoherenceRequestType:RdBlkM
-            || in_msg.Type == CoherenceRequestType:RdBlk
-            || in_msg.Type == CoherenceRequestType:RdBlkS
+            || in_msg.Type == CoherenceRequestType:RdBlk 
+               // CP can req dir with RdBlk
+               // dir can resp with block in E or S state
+               // CP can then silently turn M 
+               // so dir needs to conservatively track RdBlk
+               // but not RdBlkS
             || in_msg.Type == CoherenceRequestType:CtoD) {
           entry.pfState := ProbeFilterState:T;
         }
