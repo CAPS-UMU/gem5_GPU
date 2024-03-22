@@ -475,7 +475,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         TBE tbe := TBEs.lookup(in_msg.addr);
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(in_msg.addr));
         if (ownerTracking && isNotPresentProbeFilter(in_msg.addr)) { // if neither tag present nor free line available
+            DPRINTF(OPT4, "PF full, victimizing for 0x%x\n", in_msg.addr);
             Addr victim := ProbeFilterMemory.cacheProbe(in_msg.addr);
+            DPRINTF(OPT4, "PF full, victimizing 0x%x\n", victim);
             tbe := TBEs.lookup(victim);
             entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(victim));
             trigger(Event:PF_Repl, victim, entry, tbe);
@@ -857,12 +859,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(!GPUonly);
         if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
           probe_dests.broadcast(MachineType:CorePair);
+        } else {
+          DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
         }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
           if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
             probe_dests.broadcast(MachineType:CorePair);
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
           }
         }
 
@@ -877,12 +883,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+            } else {
+              DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
             }
           } else {
             if(!ownerTracking || ownerTracking && !NT && isOnGPU) {
               probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+            } else {
+              DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
             }
           }
         }
@@ -991,12 +1001,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(!GPUonly);
         if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
           probe_dests.broadcast(MachineType:CorePair);
+        } else {
+          DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
         }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
           if(!ownerTracking || ownerTracking && !NT && !isOnGPU) {
             probe_dests.broadcast(MachineType:CorePair);
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
           }
         }
 
@@ -1007,6 +1021,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
           }
         }
       }
@@ -1062,13 +1078,17 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       if (CPUonly) {
         assert(!GPUonly);
         if (!ownerTracking || ownerTracking && !NT && !isOnGPU) {
-        probe_dests.broadcast(MachineType:CorePair);
+          probe_dests.broadcast(MachineType:CorePair);
+        } else {
+          DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
         }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
           if (!ownerTracking || ownerTracking && !NT && !isOnGPU) {
-          probe_dests.broadcast(MachineType:CorePair);
+            probe_dests.broadcast(MachineType:CorePair);
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
           }
         }
 
@@ -1078,12 +1098,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
-        }
+          } else {
+            DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
+          }
         } else {
           if (!ownerTracking || ownerTracking && !NT && isOnGPU) {
           probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+          } else {
+            DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
           }
         }
       }
@@ -1346,7 +1370,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           tbe.DataBlk := tmp;
           tbe.writeMask.fillMask();
         } else if (tbe.Dirty) {
-          assert(false); 
+          // assert(false); 
+          // Double data possible with multi owned dirty L2s
           // double data is impossible
           if(tbe.atomicData == false && tbe.wtData == false) {
             assert(tbe.atomicDataReturn == false && tbe.atomicDataNoReturn == false);
@@ -1480,7 +1505,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         }
         tbe.responded := true;
       } else {
-        DPRINTF(OPT1, "NotApplicable"); // usually for B_P (PF_Repl)
+        DPRINTF(OPT1, "Early prbResp NA for PF_Repl\n"); // usually for B_P (PF_Repl)
       }
     }
   }
@@ -1678,6 +1703,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
          * If there's a tagMatch, you need to probe, cause line in system
          * So nothing special
          */
+        DPRINTF(OPT4, "PF tag present\n");
       }
     }
   }
@@ -1706,22 +1732,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       peek(requestNetwork_in, CPURequestMsg) {
         assert(ProbeFilterMemory.isTagPresent(address));
         CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-        if (in_msg.Type == CoherenceRequestType:WriteThrough) {
+        entry.isOnCPU := false;
+        entry.isOnGPU := false;
+        if (in_msg.Type == CoherenceRequestType:WriteThrough
+            || in_msg.Type == CoherenceRequestType:Atomic
+            || in_msg.Type == CoherenceRequestType:RdBlkM
+            || in_msg.Type == CoherenceRequestType:RdBlk
+            || in_msg.Type == CoherenceRequestType:RdBlkS
+            || in_msg.Type == CoherenceRequestType:CtoD) {
           entry.pfState := ProbeFilterState:T;
-          entry.isOnCPU := false;
-          entry.isOnGPU := false;
-        } else if (in_msg.Type == CoherenceRequestType:Atomic) {
-          entry.pfState := ProbeFilterState:T;
-          entry.isOnCPU := false;
-          entry.isOnGPU := false;
-        } else if (in_msg.Type == CoherenceRequestType:RdBlkM) {
-          entry.pfState := ProbeFilterState:T;
-          entry.isOnCPU := false;
-          entry.isOnGPU := false;
-        //} else if (in_msg.Type == CoherenceRequestType:CtoD) {
-        //  entry.pfState := ProbeFilterState:T;
-        //  entry.isOnCPU := false;
-        //  entry.isOnGPU := false;
         }
         if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
           entry.isOnCPU := true;
@@ -1735,12 +1754,17 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
     if(ownerTracking) {
       peek(requestNetwork_in, CPURequestMsg) {
-        if (ProbeFilterMemory.isTagPresent(address)) {
-          CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-          if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {//CorePair has inclusive L2
-              entry.isOnCPU := false;
-          }
-        }
+        // Inclusive dir, so has to have the tag present
+        assert(ProbeFilterMemory.isTagPresent(address));
+        // The following is useless
+        //if (ProbeFilterMemory.isTagPresent(address)) { // gratuitous
+        //  CacheEntry entry := static_cast(CacheEntry, 
+        //      "pointer", ProbeFilterMemory.lookup(address));
+        //  if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
+        //    // CorePair has inclusive L2 but other CPs may be caching the line too
+        //    entry.isOnCPU := false;
+        //  }
+        //}
       }
     }
   }
