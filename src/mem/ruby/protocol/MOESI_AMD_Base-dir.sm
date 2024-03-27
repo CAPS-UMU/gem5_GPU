@@ -173,12 +173,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     NetDest VicDirtyIgnore,  desc="VicDirty coming from whom to ignore";
   }
 
+  structure(PFEntry, desc="...", interface="AbstractCacheEntry", main="false") {
+    ProbeFilterState pfState,   desc="ProbeFilter state",default="Directory_ProbeFilterState_I";
+    MachineID Owner,            desc="Owner machineID -- for restricting the probe broadcast to unicast";
+  }
+
   structure(CacheEntry, desc="...", interface="AbstractCacheEntry") {
     DataBlock DataBlk,          desc="data for the block";
     MachineID LastSender,       desc="Mach which this block came from";
     bool Dirty,                 desc="dirty bit to alleviate excessive clean-victim writebacks";
-    ProbeFilterState pfState,   desc="ProbeFilter state",default="Directory_ProbeFilterState_I";
-    MachineID Owner,            desc="Owner machineID -- for restricting the probe broadcast to unicast";
   }
 
   structure(TBE, desc="...") {
@@ -723,39 +726,50 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(l_queueMemRdReq, "lr", desc="Read data from memory") {
     peek(requestNetwork_in, CPURequestMsg) {
-      // Below is an optimization, not functionally necessary;
-      // TODO uncomment when workign
-      //bool NT := false;
+      // TODO Below is an optimization, not functionally necessary;
+      //bool readMem := false;
       //if(ownerTracking) {
       //  assert(ProbeFilterMemory.isTagPresent(address));
-      //  CacheEntry entry := static_cast(CacheEntry,
+      //  PFEntry pf := static_cast(PFEntry,
       //      "pointer", ProbeFilterMemory.lookup(address));
-      //  NT := entry.pfState == ProbeFilterState:I;
-      //  DPRINTF(OPT4, "Line status in PF: 0x%x:  %s", address, entry.pfState);
+      //  readMem := (pf.pfState == ProbeFilterState:I 
+      //              || pf.pfState == ProbeFilterState:S && (tbe.TBEState == State:BS_PM || (tbe.TBEState == State:B_PM) && machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair)
+      //              );
+      //  DPRINTF(OPT4, "Line status in PF: 0x%x:  %s", address, pf.pfState);
       //}
-
-      if (L3CacheMemory.isTagPresent(address)) {
-        enqueue(L3TriggerQueue_out, TriggerMsg, l3_hit_latency) {
-          out_msg.addr := address;
-          out_msg.Type := TriggerType:L3Hit;
-          DPRINTF(RubySlicc, "%s\n", out_msg);
+      //if (
+      //    !ownerTracking || 
+      //    ownerTracking && readMem
+      //   ) {
+        if (L3CacheMemory.isTagPresent(address)) {
+          enqueue(L3TriggerQueue_out, TriggerMsg, l3_hit_latency) {
+            out_msg.addr := address;
+            out_msg.Type := TriggerType:L3Hit;
+            DPRINTF(RubySlicc, "%s\n", out_msg);
+          }
+          CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
+          if (tbe.Dirty == false) {
+            tbe.DataBlk := entry.DataBlk;
+          }
+          tbe.LastSender := entry.LastSender;
+          tbe.L3Hit := true;
+          tbe.MemData := true;
+          L3CacheMemory.deallocate(address); // to maintain exclusivity TODO -- doesn't make sense
+        } else {
+          enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+            out_msg.addr := address;
+            out_msg.Type := MemoryRequestType:MEMORY_READ;
+            out_msg.Sender := machineID;
+            out_msg.MessageSize := MessageSizeType:Request_Control;
+          }
         }
-        CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
-        if (tbe.Dirty == false) {
-          tbe.DataBlk := entry.DataBlk;
-        }
-        tbe.LastSender := entry.LastSender;
-        tbe.L3Hit := true;
-        tbe.MemData := true;
-        L3CacheMemory.deallocate(address); // to maintain exclusivity TODO -- doesn't make sense
-      } else {
-        enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-          out_msg.addr := address;
-          out_msg.Type := MemoryRequestType:MEMORY_READ;
-          out_msg.Sender := machineID;
-          out_msg.MessageSize := MessageSizeType:Request_Control;
-        }
-      }
+      //} else if (ownerTracking && !readMem) {
+      //  enqueue(L3TriggerQueue_out, TriggerMsg, l3_hit_latency) {
+      //    out_msg.addr := address;
+      //    out_msg.Type := TriggerType:L3Hit;
+      //    DPRINTF(RubySlicc, "%s\n", out_msg);
+      //  }
+      //}
     }
   }
 
@@ -773,6 +787,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(icd_probeInvCoreDataForDMA, "icd", desc="Probe inv cores, return data for DMA") {
     peek(dmaRequestQueue_in, DMARequestMsg) {
+      DPRINTF(OPT4, "DMA stuff really happens!\n");
       NetDest probe_dests;
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
@@ -829,11 +844,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(dc_probeInvCoreData, "dc", desc="probe inv cores, return data") {
     peek(requestNetwork_in, CPURequestMsg) {
       NetDest probe_dests;
-      bool NT := false;
+      bool noProbe := false;
       if(ownerTracking) {
-        CacheEntry entry := static_cast(CacheEntry, 
+        PFEntry entry := static_cast(PFEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
-        NT := entry.pfState == ProbeFilterState:I;
+        noProbe := entry.pfState == ProbeFilterState:I;
       }
 
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
@@ -844,7 +859,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       //                         if no write conflict
       if (CPUonly) {
         assert(!GPUonly);
-        if(!ownerTracking || ownerTracking && !NT) {
+        if(!ownerTracking || ownerTracking && !noProbe) {
           probe_dests.broadcast(MachineType:CorePair);
         } else {
           DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
@@ -852,7 +867,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          if(!ownerTracking || ownerTracking && !NT) {
+          if(!ownerTracking || ownerTracking && !noProbe) {
             probe_dests.broadcast(MachineType:CorePair);
           } else {
             DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
@@ -866,7 +881,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
              in_msg.Type != CoherenceRequestType:AtomicNoReturn) ||
              !in_msg.NoWriteConflict) {
           if (noTCCdir) {
-            if(!ownerTracking || ownerTracking && !NT) {
+            if(!ownerTracking || ownerTracking && !noProbe) {
               probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
@@ -874,7 +889,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
             }
           } else {
-            if(!ownerTracking || ownerTracking && !NT) {
+            if(!ownerTracking || ownerTracking && !noProbe) {
               probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
@@ -915,6 +930,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(scd_probeShrCoreDataForDma, "dsc", desc="probe shared cores, return data for DMA") {
     peek(dmaRequestQueue_in, DMARequestMsg) {
+      DPRINTF(OPT4, "DMA stuff really happens!\n");
       NetDest probe_dests;
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
@@ -968,12 +984,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(sc_probeShrCoreData, "sc", desc="probe shared cores, return data") {
     peek(requestNetwork_in, CPURequestMsg) { // not the right network?
       NetDest probe_dests;
-      bool NT := false;
+      bool noProbe := false;
       if(ownerTracking) {
-        CacheEntry entry := static_cast(CacheEntry, 
+        PFEntry entry := static_cast(PFEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
-        NT := entry.pfState == ProbeFilterState:I;
+        noProbe := entry.pfState == ProbeFilterState:I ||
+                 entry.pfState == ProbeFilterState:S;
       }
+      // need to artificially intimate requestor that line came from another cache
+      // so it doesn't assume exclusivity
+      tbe.Cached := true;
 
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
@@ -982,15 +1002,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
       if (CPUonly) {
         assert(!GPUonly);
-        if(!ownerTracking || ownerTracking && !NT) {
+        if(!ownerTracking || ownerTracking && !noProbe) {
           probe_dests.broadcast(MachineType:CorePair);
+          // TODO probe unicast
         } else {
           DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
         }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          if(!ownerTracking || ownerTracking && !NT) {
+          if(!ownerTracking || ownerTracking && !noProbe) {
             probe_dests.broadcast(MachineType:CorePair);
           } else {
             DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
@@ -1000,7 +1021,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         // CPU + GPU or GPU only system
         // We don't need to notify TCC about reads
         if (!noTCCdir) {
-          if(!ownerTracking || ownerTracking && !NT) {
+          if(!ownerTracking || ownerTracking && !noProbe) {
             probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
@@ -1044,7 +1065,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       NetDest probe_dests;
       bool NT := false;
       if(ownerTracking) {
-        CacheEntry entry := static_cast(CacheEntry, 
+        PFEntry entry := static_cast(PFEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         NT := entry.pfState == ProbeFilterState:I;
       }
@@ -1238,7 +1259,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         tbe.DataBlk.copyPartial(in_msg.DataBlk,in_msg.writeMask);
         tbe.Dirty := true;
       }
-      tbe.OriginalRequestor := in_msg.Requestor;
+      tbe.OriginalRequestor := in_msg.Requestor; // includes both GPU and CPU caches
       tbe.NumPendingAcks := 0;
       tbe.Cached := in_msg.ForceShared;
       tbe.InitialRequestTime := in_msg.InitialRequestTime;
@@ -1683,12 +1704,14 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         //   but cacheAvail has to be true (yes, think carefully)
         //   otherwise PF_Repl should have been called
         assert(ProbeFilterMemory.cacheAvail(address));
-        DPRINTF(OPT4, "RdBlk* received and CacheAvail, so preallotting PF entry\n");
-        CacheEntry entry := static_cast(CacheEntry, 
+        DPRINTF(OPT4, "RdBlk* or Atomic/WT received and CacheAvail, so preallotting PF entry\n");
+        PFEntry entry := static_cast(PFEntry, 
             "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
         APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry since tag no match & cacheAvail ");
-        entry.pfState := ProbeFilterState:I;
+        
         // will be updated on the return path of a line
+        entry.pfState := ProbeFilterState:I;
+        entry.Owner := tbe.OriginalRequestor; // could be CPU/GPU caches
       } else {
         /* TagMatch -- either for the victim during PF_Repl
          *   or for RdBlkX/WT/Atomic during original request
@@ -1701,7 +1724,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(mpfe_markPFEntryForEviction, "mpfe", desc="Mark this PF entry is being evicted") {
     assert(ProbeFilterMemory.isTagPresent(address));
-    CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+    PFEntry entry := static_cast(PFEntry, "pointer", ProbeFilterMemory.lookup(address));
     entry.pfState := ProbeFilterState:B;
     peek(requestNetwork_in, CPURequestMsg) {
       tbe.demandAddress := in_msg.addr;
@@ -1722,21 +1745,31 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     if (ownerTracking) {
       peek(requestNetwork_in, CPURequestMsg) {
         assert(ProbeFilterMemory.isTagPresent(address));
-        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-        if (in_msg.Type == CoherenceRequestType:WriteThrough
+        PFEntry entry := static_cast(PFEntry, "pointer", ProbeFilterMemory.lookup(address));
+        ProbeFilterState origState := entry.pfState;
+        if (   in_msg.Type == CoherenceRequestType:WriteThrough
             || in_msg.Type == CoherenceRequestType:Atomic
             || in_msg.Type == CoherenceRequestType:AtomicReturn
             || in_msg.Type == CoherenceRequestType:AtomicNoReturn
             || in_msg.Type == CoherenceRequestType:RdBlkM
-            || in_msg.Type == CoherenceRequestType:RdBlk 
-               // CP can req dir with RdBlk
-               // dir can resp with block in E or S state
-               // CP can then silently turn M 
-               // so dir needs to conservatively track RdBlk
-               // but not RdBlkS
             || in_msg.Type == CoherenceRequestType:CtoD) {
           entry.pfState := ProbeFilterState:O;
-        }
+          // when pfState is I, entry.Owner is already initalized to tbe.OriginalRequestor
+          // but when pfState wasn't I, needs update
+          entry.Owner := tbe.OriginalRequestor;
+        } else if(origState == ProbeFilterState:I && in_msg.Type == CoherenceRequestType:RdBlkS) {
+          entry.pfState := ProbeFilterState:S;
+        } else if(origState == ProbeFilterState:I && in_msg.Type == CoherenceRequestType:RdBlk) {
+          // dir needs to consider RdBlk as O if pfState was I and also update owner
+          entry.pfState := ProbeFilterState:O;
+          entry.Owner := tbe.OriginalRequestor; // duplicate update
+        } else if(origState == ProbeFilterState:S && in_msg.Type == CoherenceRequestType:RdBlk) {
+          // no change
+        } else if(origState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:RdBlk) {
+          entry.pfState := ProbeFilterState:S;
+        } // else if(origState == ProbeFilterState:S|O && in_msg.Type == CoherenceRequestType:RdBlkS)
+          // no change
+          // TODO any missing cases?
       }
     }
   }
@@ -1748,7 +1781,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(ProbeFilterMemory.isTagPresent(address));
         // The following is useless
         //if (ProbeFilterMemory.isTagPresent(address)) { // gratuitous
-        //  CacheEntry entry := static_cast(CacheEntry, 
+        //  PFEntry entry := static_cast(PFEntry, 
         //      "pointer", ProbeFilterMemory.lookup(address));
         //  if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
         //    // CorePair has inclusive L2 but other CPs may be caching the line too
@@ -2046,7 +2079,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition({B, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B_P}, {VicDirty, VicClean}) {
-    // TODO: for B_P, if a line has requested VicClean/Dirty, adn tehn receives a backProbe (prbInvData)
+    // For B_P, if a line has requested VicClean/Dirty, adn tehn receives a backProbe (prbInvData)
     //       What happens?
     //       Seems like line will still invalidate, and send data and immediately send its original request
     //       because of which it needed victimizing in the first place
@@ -2068,7 +2101,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition({BL, BS_M, BM_M, B_M, BP, BS_PM, BM_PM, B_PM, BS_Pm, BM_Pm, B_Pm, B_P, B}, PF_Repl) {
-    // TODO is ordering violated?
+    // For B_P, since the PF victim is already being cleared out
+    //          no need to stall since that'll lead to two (or more) PF replacements
+    //          no need to recycle either (same)
+    //          infact it should be completely disregarded (how to do that?)
+    // TODO: One way would be to skip victimizing another line by having a exit-door at each event -- if the cacheAvail has somehow become true, skip probes
     zz_recycleRequestQueue;
   }
 
