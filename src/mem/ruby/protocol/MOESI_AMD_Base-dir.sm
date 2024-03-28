@@ -173,15 +173,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     NetDest VicDirtyIgnore,  desc="VicDirty coming from whom to ignore";
   }
 
-  structure(PFEntry, desc="...", interface="AbstractCacheEntry", main="false") {
-    ProbeFilterState pfState,   desc="ProbeFilter state",default="Directory_ProbeFilterState_I";
-    MachineID Owner,            desc="Owner machineID -- for restricting the probe broadcast to unicast";
-  }
-
   structure(CacheEntry, desc="...", interface="AbstractCacheEntry") {
     DataBlock DataBlk,          desc="data for the block";
     MachineID LastSender,       desc="Mach which this block came from";
     bool Dirty,                 desc="dirty bit to alleviate excessive clean-victim writebacks";
+    ProbeFilterState pfState,   desc="ProbeFilter state",default="Directory_ProbeFilterState_I";
+    MachineID Owner,            desc="Owner machineID -- for restricting the probe broadcast to unicast";
   }
 
   structure(TBE, desc="...") {
@@ -730,7 +727,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       //bool readMem := false;
       //if(ownerTracking) {
       //  assert(ProbeFilterMemory.isTagPresent(address));
-      //  PFEntry pf := static_cast(PFEntry,
+      //  CacheEntry pf := static_cast(CacheEntry,
       //      "pointer", ProbeFilterMemory.lookup(address));
       //  readMem := (pf.pfState == ProbeFilterState:I 
       //              || pf.pfState == ProbeFilterState:S && (tbe.TBEState == State:BS_PM || (tbe.TBEState == State:B_PM) && machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair)
@@ -768,6 +765,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       //    out_msg.addr := address;
       //    out_msg.Type := TriggerType:L3Hit;
       //    DPRINTF(RubySlicc, "%s\n", out_msg);
+      //    // TODO something messes up here!
       //  }
       //}
     }
@@ -846,7 +844,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       NetDest probe_dests;
       bool noProbe := false;
       if(ownerTracking) {
-        PFEntry entry := static_cast(PFEntry, 
+        CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I;
       }
@@ -986,14 +984,16 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       NetDest probe_dests;
       bool noProbe := false;
       if(ownerTracking) {
-        PFEntry entry := static_cast(PFEntry, 
+        CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I ||
                  entry.pfState == ProbeFilterState:S;
+        // need to artificially intimate requestor that line came from another cache
+        // so it doesn't assume exclusivity
+        if (ownerTracking &&  entry.pfState == ProbeFilterState:S) {
+          tbe.Cached := true;
+        }
       }
-      // need to artificially intimate requestor that line came from another cache
-      // so it doesn't assume exclusivity
-      tbe.Cached := true;
 
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
@@ -1065,7 +1065,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       NetDest probe_dests;
       bool NT := false;
       if(ownerTracking) {
-        PFEntry entry := static_cast(PFEntry, 
+        CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         NT := entry.pfState == ProbeFilterState:I;
       }
@@ -1540,9 +1540,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         out_msg.addr := address;
         out_msg.Type := TriggerType:AcksComplete;
       }
+      APPEND_TRANSITION_COMMENT(" Triggered ProbeAcksComplete \n");
     }
-    APPEND_TRANSITION_COMMENT(" Check: Acks remaining: ");
-    APPEND_TRANSITION_COMMENT(tbe.NumPendingAcks);
   }
 
   action(rv_removeVicDirtyIgnore, "rv", desc="Remove ignored core") {
@@ -1705,7 +1704,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         //   otherwise PF_Repl should have been called
         assert(ProbeFilterMemory.cacheAvail(address));
         DPRINTF(OPT4, "RdBlk* or Atomic/WT received and CacheAvail, so preallotting PF entry\n");
-        PFEntry entry := static_cast(PFEntry, 
+        CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
         APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry since tag no match & cacheAvail ");
         
@@ -1724,7 +1723,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(mpfe_markPFEntryForEviction, "mpfe", desc="Mark this PF entry is being evicted") {
     assert(ProbeFilterMemory.isTagPresent(address));
-    PFEntry entry := static_cast(PFEntry, "pointer", ProbeFilterMemory.lookup(address));
+    CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
     entry.pfState := ProbeFilterState:B;
     peek(requestNetwork_in, CPURequestMsg) {
       tbe.demandAddress := in_msg.addr;
@@ -1745,7 +1744,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     if (ownerTracking) {
       peek(requestNetwork_in, CPURequestMsg) {
         assert(ProbeFilterMemory.isTagPresent(address));
-        PFEntry entry := static_cast(PFEntry, "pointer", ProbeFilterMemory.lookup(address));
+        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
         ProbeFilterState origState := entry.pfState;
         if (   in_msg.Type == CoherenceRequestType:WriteThrough
             || in_msg.Type == CoherenceRequestType:Atomic
@@ -1781,7 +1780,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(ProbeFilterMemory.isTagPresent(address));
         // The following is useless
         //if (ProbeFilterMemory.isTagPresent(address)) { // gratuitous
-        //  PFEntry entry := static_cast(PFEntry, 
+        //  CacheEntry entry := static_cast(CacheEntry, 
         //      "pointer", ProbeFilterMemory.lookup(address));
         //  if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
         //    // CorePair has inclusive L2 but other CPs may be caching the line too

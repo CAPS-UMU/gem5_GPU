@@ -351,12 +351,13 @@ class DirCache(RubyCache):
     def create(self, options, ruby_system, system):
         self.size = MemorySize(options.l3_size)
         self.size.value /= options.num_dirs
+        #self.assoc = options.l3_assoc
         self.assoc = str(int(options.l3_assoc)*8) # for 6 L2 caches
         self.dataArrayBanks /= options.num_dirs
         self.tagArrayBanks /= options.num_dirs
         self.dataArrayBanks /= options.num_dirs
         self.tagArrayBanks /= options.num_dirs
-        self.dataAccessLatency = options.l3_data_latency # /2 # TODO perhaps a lower value?
+        self.dataAccessLatency = options.l3_data_latency # TODO perhaps a lower value?
         self.tagAccessLatency = options.l3_tag_latency # if options.l3_tag_latency == 1 else 1
         self.resourceStalls = False
         self.replacement_policy = TreePLRURP() # TODO consider carefully
