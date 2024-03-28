@@ -473,22 +473,22 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           trigger(Event:Atomic, in_msg.addr, entry, tbe);
         } else if (in_msg.Type == CoherenceRequestType:VicDirty) {
           if (getDirectoryEntry(in_msg.addr).VicDirtyIgnore.isElement(in_msg.Requestor)) {
-            DPRINTF(RubySlicc, "Dropping VicDirty for address %s\n", in_msg.addr);
+            DPRINTF(RubySlicc, "Dropping VicDirty for address 0x%x\n", in_msg.addr);
             trigger(Event:StaleVicDirty, in_msg.addr, entry, tbe);
           } else {
-            DPRINTF(RubySlicc, "Got VicDirty from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got VicDirty from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:VicDirty, in_msg.addr, entry, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:VicClean) {
           if (getDirectoryEntry(in_msg.addr).VicDirtyIgnore.isElement(in_msg.Requestor)) {
-            DPRINTF(RubySlicc, "Dropping VicClean for address %s\n", in_msg.addr);
+            DPRINTF(RubySlicc, "Dropping VicClean for address 0x%x\n", in_msg.addr);
             trigger(Event:StaleVicDirty, in_msg.addr, entry, tbe);
           } else {
-            DPRINTF(RubySlicc, "Got VicClean from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got VicClean from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:VicClean, in_msg.addr, entry, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:WriteFlush) {
-            DPRINTF(RubySlicc, "Got Flush from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got Flush from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:Flush, in_msg.addr, entry, tbe);
         } else {
           error("Bad request message type");
@@ -1902,6 +1902,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     responseNetwork_in.recycle(clockEdge(), cyclesToTicks(recycle_latency));
   }
 
+  action(std_stallAndWaitDemandReq, "std", desc="Stall and wait on the deamnd address") {
+    Addr demandAddr := tbe.demandAddress;
+    stall_and_wait(requestNetwork_in, demandAddr);
+  }
+
   action(st_stallAndWaitRequest, "st", desc="Stall and wait on the address") {
     stall_and_wait(requestNetwork_in, address);
   }
@@ -1959,6 +1964,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     bp_backProbe;
     sm_setMRU; // TODO we don't need this, right?
     mpfe_markPFEntryForEviction;
+    std_stallAndWaitDemandReq; // puts the demand request to wait
   }
 
   transition(U, DmaRead, BDR_PM) {L3TagArrayRead} {
