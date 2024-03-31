@@ -1516,7 +1516,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         }
         tbe.responded := true;
       } else {
-        DPRINTF(OPT1, "Early prbResp NA for PF_Repl\n"); // usually for B_P (PF_Repl)
+        //DPRINTF(OPT1, "Early prbResp NA for PF_Repl\n"); // usually for B_P (PF_Repl)
       }
     }
   }
