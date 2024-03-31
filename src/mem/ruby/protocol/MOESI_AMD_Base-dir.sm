@@ -181,6 +181,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     MachineID Owner,            desc="Owner machineID -- for restricting the probe broadcast to unicast";
   }
 
+  structure(SharerList, desc="list of sharers and owner of a line") {
+    MachineID s0, desc="...";
+    bool v0, desc="...";
+    MachineID s1, desc="...";
+    bool v1, desc="...";
+    MachineID s2, desc="...";
+    bool v2, desc="...";
+  }
+
   structure(TBE, desc="...") {
     State TBEState,     desc="Transient state";
     DataBlock DataBlk,  desc="data for the block";
@@ -795,6 +804,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       if (CPUonly) {
         assert(!GPUonly);
         probe_dests.broadcast(MachineType:CorePair);
+
       } else {
         // CPU + GPU system
         if (!GPUonly) {
@@ -983,13 +993,19 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     peek(requestNetwork_in, CPURequestMsg) { // not the right network?
       NetDest probe_dests;
       bool noProbe := false;
+      bool unicast := false;
+      MachineID owner;
       if(ownerTracking) {
         CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I ||
                  entry.pfState == ProbeFilterState:S;
+        // only restrict probe to owner instead of broadcast
+        unicast := entry.pfState == ProbeFilterState:O;
+        owner := entry.Owner;
+
         // need to artificially intimate requestor that line came from another cache
-        // so it doesn't assume exclusivity
+        // so it doesn't assume exclusivity when eliding probe when pfState S
         if (ownerTracking &&  entry.pfState == ProbeFilterState:S) {
           tbe.Cached := true;
         }
@@ -1003,8 +1019,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       if (CPUonly) {
         assert(!GPUonly);
         if(!ownerTracking || ownerTracking && !noProbe) {
-          probe_dests.broadcast(MachineType:CorePair);
-          // TODO probe unicast
+          if(unicast) {
+            probe_dests.add(owner);
+          } else {
+            probe_dests.broadcast(MachineType:CorePair);
+          }
         } else {
           DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
         }
@@ -1012,7 +1031,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         // CPU + GPU system
         if (!GPUonly) {
           if(!ownerTracking || ownerTracking && !noProbe) {
-            probe_dests.broadcast(MachineType:CorePair);
+            if(unicast) {
+              DPRINTF(OPT4, "ProbeUnicast\n");
+              probe_dests.add(owner);
+            } else {
+              probe_dests.broadcast(MachineType:CorePair);
+            }
           } else {
             DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
           }
@@ -1026,7 +1050,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
           } else {
-            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
+            DPRINTF(OPT4, "Skipping probing GPU because we don't care to notify it\n");
           }
         }
       }
