@@ -454,9 +454,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(in_msg.addr));
         
         // inclusive directory, so cannot not have line tracked when ownerTracking
-        assert(!ownerTracking || 
-                in_msg.Type == CoherenceRequestType:VicClean && !isNotPresentProbeFilter(in_msg.addr) ||
-                in_msg.Type == CoherenceRequestType:VicDirty && !isNotPresentProbeFilter(in_msg.addr));
+        if (ownerTracking || sharerTracking) {
+          if (in_msg.Type == CoherenceRequestType:VicClean || in_msg.Type == CoherenceRequestType:VicDirty) {
+            assert (!isNotPresentProbeFilter(in_msg.addr));
+          }
+        }
+
         if (ownerTracking && isNotPresentProbeFilter(in_msg.addr)) { 
           // if neither tag present nor free line available
           DPRINTF(OPT4, "PF full, victimizing for 0x%x\n", in_msg.addr);
