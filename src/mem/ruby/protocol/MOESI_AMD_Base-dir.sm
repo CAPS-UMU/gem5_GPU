@@ -858,7 +858,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I;
-        if (sharerTracking) {
+        if (sharerTracking && !noProbe) {
           probe_dests := entry.Sharers;
           DPRINTF(OPT5, "Sharers to be probed: %s\n", probe_dests);
         }
@@ -892,6 +892,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         }
 
         // CPU + GPU or GPU only system
+        // conservative; might be able to elide probes here as well
         if ((in_msg.Type != CoherenceRequestType:WriteThrough &&
              in_msg.Type != CoherenceRequestType:Atomic &&
              in_msg.Type != CoherenceRequestType:AtomicReturn &&
@@ -899,17 +900,25 @@ machine(MachineType:Directory, "AMD Baseline protocol")
              !in_msg.NoWriteConflict) {
           if (noTCCdir) {
             //if(!ownerTracking || ownerTracking && !noProbe) {
-              probe_dests.add(mapAddressToRange(address, MachineType:TCC,
+              if(!probe_dests.isElement(mapAddressToRange(address, MachineType:TCC,
+                                              TCC_select_low_bit,
+                                              TCC_select_num_bits)) {
+                probe_dests.add(mapAddressToRange(address, MachineType:TCC,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+              }
             //} else {
             //  DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
             //}
           } else {
             //if(!ownerTracking || ownerTracking && !noProbe) {
-              probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
+              if(!probe_dests.isElement(mapAddressToRange(address, MachineType:TCCdir,
+                                              TCC_select_low_bit,
+                                              TCC_select_num_bits)) {
+                probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                               TCC_select_low_bit,
                                               TCC_select_num_bits));
+              }
             //} else {
             //  DPRINTF(OPT4, "Skipping probing TCC because it does not have line\n");
             //}
@@ -1027,12 +1036,14 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
       if (CPUonly) {
         assert(!GPUonly);
-        if(!ownerTracking || (ownerTracking || sharerTracking) && !noProbe) {
+        if (!ownerTracking) {
+          probe_dests.broadcast(MachineType:CorePair);
+        }
+        else if((ownerTracking || sharerTracking) && !noProbe) {
           if(unicast) {
             probe_dests.add(owner);
           } else {
             assert(false); // should not enter here
-            // probe_dests.broadcast(MachineType:CorePair);
           }
         } else {
           DPRINTF(OPT4, "Skipping probing CorePair because it does not have modified line\n");
@@ -1040,13 +1051,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          if(!ownerTracking || (ownerTracking || sharerTracking) && !noProbe) {
+          if (!ownerTracking) {
+            probe_dests.broadcast(MachineType:CorePair);
+          }
+          else if((ownerTracking || sharerTracking) && !noProbe) {
             if(unicast) {
               DPRINTF(OPT4, "ProbeUnicast\n");
               probe_dests.add(owner);
             } else {
               assert (false); // should not enter here
-              // probe_dests.broadcast(MachineType:CorePair);
             }
           } else {
             DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
@@ -1055,6 +1068,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
         // CPU + GPU or GPU only system
         // We don't need to notify TCC about reads
+        // this is conservative, might be able to elide probes here as well
         if (!noTCCdir) {
           if(!ownerTracking || (ownerTracking || sharerTracking) && !noProbe) {
             probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
@@ -1796,7 +1810,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.pfState := ProbeFilterState:O;
           entry.Owner := tbe.OriginalRequestor;
           // do not add to sharer list
-          assert(!entry.Sharer.isElement(entry.Owner));
+          assert(!entry.Sharers.isElement(entry.Owner));
         } else if(origState == ProbeFilterState:I && in_msg.Type == CoherenceRequestType:RdBlkS) {
           entry.pfState := ProbeFilterState:S;
           if(sharerTracking) {
@@ -1808,7 +1822,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.pfState := ProbeFilterState:O;
           entry.Owner := tbe.OriginalRequestor;
           // do not add to sharer list
-          assert(!entry.Sharer.isElement(entry.Owner));
+          assert(!entry.Sharers.isElement(entry.Owner));
         } else if(origState == ProbeFilterState:S && in_msg.Type == CoherenceRequestType:RdBlk) {
           // no change
           // in the probe action, it will already be updated that the line was received from a cache
