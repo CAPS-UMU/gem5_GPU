@@ -51,7 +51,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   bool wbLLC := "True"; //opt3
   bool noWBCleanVictimsToLLC := "False"; //opt3_5
   bool ownerTracking := "True"; //opt4
-  bool sharerTracking := "False"; //opt5 (enhancement on opt4)
+  bool sharerTracking := "True"; //opt5 (enhancement on opt4)
   int num_sharers := 4;
   bool L2isWB;
   bool inclusiveDir := "False";
@@ -1015,7 +1015,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
         // need to artificially intimate requestor that line came from another cache
         // so it doesn't assume exclusivity when eliding probe when pfState S
-        if ((ownerTracking || sharerTracking) && entry.pfState == ProbeFilterState:S) {
+        if (entry.pfState == ProbeFilterState:S) {
           tbe.Cached := true;
         }
       }
@@ -1746,7 +1746,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         
         // will be updated on the return path of a line
         entry.pfState := ProbeFilterState:I;
-        entry.Owner := tbe.OriginalRequestor; // could be either CPU/GPU caches
         assert(entry.Sharers.count() == 0);
         DPRINTF(OPT5, "Initialized sharersList %s\n", entry.Sharers);
       } else {
@@ -1784,10 +1783,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(ProbeFilterMemory.isTagPresent(address));
         CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
         ProbeFilterState origState := entry.pfState;
-        if(sharerTracking) {
-          entry.Sharers.add(tbe.OriginalRequestor);
-          DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
-        }
+          if(sharerTracking) {
+            entry.Sharers.add(tbe.OriginalRequestor);
+            DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
+          }
         if (   in_msg.Type == CoherenceRequestType:WriteThrough
             || in_msg.Type == CoherenceRequestType:Atomic
             || in_msg.Type == CoherenceRequestType:AtomicReturn
@@ -1795,21 +1794,40 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             || in_msg.Type == CoherenceRequestType:RdBlkM
             || in_msg.Type == CoherenceRequestType:CtoD) {
           entry.pfState := ProbeFilterState:O;
-          // when pfState is I, entry.Owner is already initalized to tbe.OriginalRequestor
-          // but when pfState wasn't I, needs update
           entry.Owner := tbe.OriginalRequestor;
+          // do not add to sharer list
+          assert(!entry.Sharer.isElement(entry.Owner));
         } else if(origState == ProbeFilterState:I && in_msg.Type == CoherenceRequestType:RdBlkS) {
           entry.pfState := ProbeFilterState:S;
+          if(sharerTracking) {
+            entry.Sharers.add(tbe.OriginalRequestor);
+            DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
+          }
         } else if(origState == ProbeFilterState:I && in_msg.Type == CoherenceRequestType:RdBlk) {
           // dir needs to consider RdBlk as O if pfState was I and also update owner
           entry.pfState := ProbeFilterState:O;
-          entry.Owner := tbe.OriginalRequestor; // duplicate update
+          entry.Owner := tbe.OriginalRequestor;
+          // do not add to sharer list
+          assert(!entry.Sharer.isElement(entry.Owner));
         } else if(origState == ProbeFilterState:S && in_msg.Type == CoherenceRequestType:RdBlk) {
           // no change
+          // in the probe action, it will already be updated that the line was received from a cache
+          //    despite it having been received from the LLC/Mem
+          if(sharerTracking) {
+            entry.Sharers.add(tbe.OriginalRequestor);
+            DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
+          }
         } else if(origState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:RdBlk) {
           entry.pfState := ProbeFilterState:S;
+          if(sharerTracking) {
+            entry.Sharers.add(tbe.OriginalRequestor);
+            DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
+          }
         } else if((origState == ProbeFilterState:S || origState == ProbeFilterState:O) && in_msg.Type == CoherenceRequestType:RdBlkS) {
-          // no change
+          if(sharerTracking) {
+            entry.Sharers.add(tbe.OriginalRequestor);
+            DPRINTF(OPT5, "sharersList: adding a sharer: %s\n", entry.Sharers);
+          }
         } else {
           // TODO any missing cases?
           assert (false);
