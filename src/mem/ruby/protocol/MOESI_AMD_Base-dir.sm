@@ -1842,10 +1842,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             // in the probe action, it will already be updated that the line was received from a cache
             //    despite it having been received from the LLC/Mem
             if(sharerTracking) {
-              if(entry.Sharers.isElement(tbe.OriginalRequestor) && entry.Sharers.count == 1) {
+              if(entry.Sharers.isElement(tbe.OriginalRequestor) && entry.Sharers.count() == 1) {
                 // previous-sharer is now requesting exclusivity, can be granted
                 entry.pfState := ProbeFilterState:O;
-                entry.Shareres.remove(tbe.OriginalRequestor);
+                entry.Sharers.remove(tbe.OriginalRequestor);
                 // need to artificially intimate requestor that line came from another cache
                 // so it doesn't assume exclusivity when eliding probe when pfState S
                 // TODO think if this needs to apply to owner tracking?
