@@ -861,8 +861,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         if (sharerTracking && !noProbe) {
           probe_dests := entry.Sharers;
           // sharers list does not include owner
-          probe_dests.add(entry.Owner);
-          DPRINTF(OPT5, "SHL [0x%x] Sharers to be probed: %s\n", address, probe_dests);
+          if(entry.pfState == ProbeFilterState:O) {
+            probe_dests.add(entry.Owner);
+          }
+          DPRINTF(OPT5, "SHL [0x%x] Sharers to be invalidated: %s\n", address, probe_dests);
         }
       }
 
@@ -1020,7 +1022,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I ||
                    entry.pfState == ProbeFilterState:S || 
-                   entry.pfState == ProbeFilterState:O && tbe.OriginalRequestor == entry.Owner && (entry.Sharers.count() == 0);
+                   entry.pfState == ProbeFilterState:O && tbe.OriginalRequestor == entry.Owner && (entry.Sharers.isEmpty());
         // only restrict probe to owner instead of broadcast
         unicast := entry.pfState == ProbeFilterState:O;
         owner := entry.Owner;
@@ -1756,7 +1758,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry since tag no match & cacheAvail ");
         // will be updated on the return path of a line
         entry.pfState := ProbeFilterState:I;
-        assert(entry.Sharers.count() == 0);
+        assert(entry.Sharers.isEmpty());
         DPRINTF(OPT5, "SHL: [0x%x (victim/not)] Initialized sharersList\n", address);
       } else {
         /* TagMatch -- either for the victim during PF_Repl
@@ -1842,18 +1844,19 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             // in the probe action, it will already be updated that the line was received from a cache
             //    despite it having been received from the LLC/Mem
             if(sharerTracking) {
-              if(entry.Sharers.isElement(tbe.OriginalRequestor) && entry.Sharers.count() == 1) {
-                // previous-sharer is now requesting exclusivity, can be granted
-                entry.pfState := ProbeFilterState:O;
-                entry.Sharers.remove(tbe.OriginalRequestor);
-                // need to artificially intimate requestor that line came from another cache
-                // so it doesn't assume exclusivity when eliding probe when pfState S
-                // TODO think if this needs to apply to owner tracking?
-                tbe.Cached := true;
-              } else {
+              // Update: cannot happen. This case is handled internally to CorePair
+              //if(entry.Sharers.isElement(tbe.OriginalRequestor) && entry.Sharers.count() == 1) {
+              //  // previous-sharer is now requesting exclusivity, can be granted
+              //  entry.pfState := ProbeFilterState:O;
+              //  entry.Sharers.remove(tbe.OriginalRequestor);
+              //  // need to artificially intimate requestor that line came from another cache
+              //  // so it doesn't assume exclusivity when eliding probe when pfState S
+              //  // TODO think if this needs to apply to owner tracking?
+              //  tbe.Cached := true;
+              //} else {
                 // new requstor requesting share
                 entry.Sharers.add(tbe.OriginalRequestor);
-              }
+              //}
             }
           }
         } else if(origState == ProbeFilterState:O) {
@@ -1875,7 +1878,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
                 // If there was an intermediate RdBlk/RdBlkS from another requestor,
                 // this line would have tuned S
                 // So, it had to have remained exclusive
-                assert(entry.Sharers.count() == 0);
+                assert(entry.Sharers.isEmpty());
                 entry.pfState := ProbeFilterState:S;
               }
               // add to the sharer list either way
@@ -1910,12 +1913,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             "pointer", ProbeFilterMemory.lookup(address));
         entry.Sharers.remove(in_msg.Requestor);
         DPRINTF(OPT5, "SHL [0x%x] L2 sharer removed; sharersList: %s\n", address, entry.Sharers);
-        if(entry.pfState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:VicDirty && entry.Sharers.count() != 0) {
+        if(entry.pfState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:VicDirty && !entry.Sharers.isEmpty()) {
           // owner is relinquishing dirty data
           entry.pfState := ProbeFilterState:S;
           DPRINTF(OPT5, "SHL Removed sole owner; pfState now S\n");
         }
-        if(entry.Sharers.count() == 0) {
+        if(entry.Sharers.isEmpty()) {
           ProbeFilterMemory.deallocate(address);
           DPRINTF(OPT5, "SHL Removed sole sharer; invalidated line\n");
         }
