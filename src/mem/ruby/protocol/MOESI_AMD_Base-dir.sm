@@ -210,6 +210,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     bool isGLCSet,      desc="Bypass GPU L1 Cache";
     bool isSLCSet,      desc="Bypass GPU L1 and L2 Cache";
     Addr demandAddress,  desc="Address of demand request which caused probe filter eviction";
+    bool cupfOn, desc="if you need to update PF conditionally (see cupf)";
   }
 
   structure(TBETable, external="yes") {
@@ -1193,20 +1194,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // here too, memory write can be saved; only writeback to L3
       // this action is entirely just a stat recorder
       if (noWBCleanVictimsToMem) {
-        if (in_msg.Dirty) {
-          // tbe.Dirty is gratuitous here, but functional writes may apply
-          // subsequent L3 write will still read dirtyness from in_msg
-          tbe.Dirty := true;
-          // TODO: If an intermediate GPU write has dirtied L3, would the
-          //      victim be written back without incorporating GPU's stuff?
-          //      The way it's done now, that's how it is
-        } else {
-          // have to update the TBE, too, because of how this
-          // directory deals with functional writes
-          // TODO gratuitous?
-          tbe.DataBlk := in_msg.DataBlk;
-          tbe.Dirty   := tbe.Dirty || in_msg.Dirty; // tbe.Dirty is anyway false
-        }
+        // subsequent L3 write will still read dirtyness from in_msg
+        // If an intermediate GPU write has dirtied L3, would the
+        //      victim be written back without incorporating GPU's stuff?
+        //      The way it's done now, that's how it is
+        // Ans: There cannot be intermediate GPU writes
+        // have to update the TBE, too, because of how this
+        // directory deals with functional writes
+        tbe.Dirty   := in_msg.Dirty;
+        tbe.DataBlk := in_msg.DataBlk;
         DPRINTF(OPT2, "MemWrite saved; only L3 will be updated\n");
       } else { // default
         enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
@@ -1353,9 +1349,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
      *    or L3 hit and it's dirty -- check this, and also seems like you're not writing data to LLC in most cases and also end up not writing to memory, so you might be missing updates made to lines -- see if you only not write to mem or llc if clean -- that might be alright though
      */
     if (
-          (tbe.wtData || tbe.atomicData) && !useL3OnWT || 
-          tbe.Dirty && noWBCleanVictimsToMem || 
-          !noWBCleanVictimsToMem && (tbe.Dirty == false)
+          !noWBCleanVictimsToMem && (tbe.wtData || tbe.atomicData || (tbe.Dirty == false)) ||
+           noWBCleanVictimsToMem && (tbe.Dirty  || tbe.Dirty)
        ) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
@@ -1630,12 +1625,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           // (due to a prior dirty write, not yet written back)
           // retain the dirty bit, even if this victim is clean
           // doesn't matter anyway since dataBlk is overwriting 
+          // on a separate note, if victim being processed is dirty
+          // incorpoate that too 
+          // so the solution is to OR entry.Dirty with in_msg.Dirty
           // TODO does the consistency model not care?
-          entry.Dirty := true; // overrides dirtyness
-          // PS Dirty bit is in the entry, not TBE
-          // TODO entry.Dirty assigned true is conservative;
-          // there's potential for opt by assigning tbe.Dirty instead;
-          // however, I'm not sure if there could be intermediate dirty writes (by GPU?)
+          entry.Dirty := entry.Dirty || in_msg.Dirty;
           assert(is_valid(tbe));
           //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
           //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
@@ -1647,7 +1641,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             Addr victim := L3CacheMemory.cacheProbe(address);
             CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                    L3CacheMemory.lookup(victim));
-            if ((noWBCleanVictimsToLLC && victim_entry.Dirty) || !noWBCleanVictimsToLLC) {
+            if (wbLLC && victim_entry.Dirty || !wbLLC) {
               enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
                 out_msg.addr := victim;
                 out_msg.Type := MemoryRequestType:MEMORY_WB;
@@ -1658,7 +1652,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             } else {
               // do not write-back, directly deallocate
               // since it's guaranteed memory has not diverged from L3
-              DPRINTF(OPT2, "MemWrite saved\n");
+              DPRINTF(OPT2, "MemWrite saved because LLC victim not dirty\n");
             }
             L3CacheMemory.deallocate(victim);
           }
@@ -1668,7 +1662,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.DataBlk := in_msg.DataBlk;
 
           entry.LastSender := in_msg.Sender;
-          entry.Dirty := true; // fresh entry, explicitify dirtiness
+          entry.Dirty := in_msg.Dirty; // fresh entry, explicitify dirtiness
         }
       } else { // never entered on !noWBCleanVictimsToLLC
                // or if L2 is sending clean victim -- this case leads to lost lines, risky one
@@ -1789,6 +1783,30 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     ProbeFilterMemory.deallocate(address);
   }
 
+  action(cupf_conditionalUpdatePF, "cupf", desc="") {
+    if (sharerTracking) {
+      if(tbe.cupfOn) {
+        assert(ProbeFilterMemory.isTagPresent(address));
+        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+        ProbeFilterState origState := entry.pfState;
+        DPRINTF(OPT5, "SHL [0x%x] Conditionally updating PF: origState:%s owner:%s tbe.Dirty? %d sharerList:%s\n", address, origState, entry.Owner, tbe.Dirty, entry.Sharers);
+        if (origState == ProbeFilterState:O) {
+              if(!tbe.Dirty) {
+                // tbe.Dirty can only be raised if probe response was dirty
+                // tbe.Dirty is otherwise only set for WT
+                // remember when a line is O it could mean E (and clean) cause of our conservative expectation.
+                // E when probe-downgraded, will change to S, not O. So check tbe.Dirty
+                entry.pfState := ProbeFilterState:S;
+                entry.Sharers.add(tbe.OriginalRequestor);
+                entry.Sharers.add(entry.Owner);
+                DPRINTF(OPT5, "SHL [0x%x] Conditionally updated PF: newState:%s owner:%s tbe.Dirty? %d sharerList:%s\n", address, origState, entry.Owner, tbe.Dirty, entry.Sharers);
+              }
+        }
+      }
+    }
+  }
+
+        
   action(upf_updateProbeFilter, "upf", desc="") {
     if (ownerTracking || sharerTracking) {
       peek(requestNetwork_in, CPURequestMsg) {
@@ -1838,7 +1856,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               entry.Sharers.add(tbe.OriginalRequestor);
             }
             // need to artificially intimate requestor that line came from another cache
-            // so it doesn't assume exclusivity when eliding probe when pfState S
+            // so it doesn't assume exclusivity when eliding probe when DirState S
             tbe.Cached := true;
           } else if(in_msg.Type == CoherenceRequestType:RdBlk) {
             // in the probe action, it will already be updated that the line was received from a cache
@@ -1869,7 +1887,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               ) {
             entry.Owner := tbe.OriginalRequestor;
             // do not add to sharer list
-            entry.Sharers.clear();
+            if(sharerTracking) {
+              entry.Sharers.clear();
+            }
           } else if( in_msg.Type == CoherenceRequestType:RdBlkS) {
             if(sharerTracking) {
               if(entry.Owner == tbe.OriginalRequestor) {
@@ -1878,9 +1898,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
                 // If there was an intermediate RdBlk/RdBlkS from another requestor,
                 // this line would have tuned S
                 // So, it had to have remained exclusive
-                assert(entry.Sharers.isEmpty());
+                if(!entry.Sharers.isEmpty()) {
+                  DPRINTF(OPT5, "Sharer's list supposed to be empty, but not: %s\n", entry.Sharers);
+                  assert(false);
+                }
                 entry.pfState := ProbeFilterState:S;
               }
+              tbe.cupfOn := true;
               // add to the sharer list either way
               entry.Sharers.add(tbe.OriginalRequestor);
             }
@@ -1889,7 +1913,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             // it can only send a RdBlkS if in E
             assert(entry.Owner != tbe.OriginalRequestor);
             if(sharerTracking) {
-              entry.Sharers.add(tbe.OriginalRequestor);
+              if(entry.Owner != tbe.OriginalRequestor) {
+                entry.Sharers.add(tbe.OriginalRequestor);
+                tbe.cupfOn := true;
+              } else {
+                DPRINTF(OPT5, "Owner requested an RdBlk\n");
+                assert (false);
+              }
             }
           }
         } else {
@@ -1904,6 +1934,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
     if(ownerTracking || sharerTracking) {
       assert(ProbeFilterMemory.isTagPresent(address));
+      if(sharerTracking) {
+        // ensure the victimized line is infact supposed to have been tracked in the dir
+        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+        assert(entry.Sharers.isElement(tbe.OriginalRequestor) || entry.Owner == tbe.OriginalRequestor);
+      }
     }
     if(sharerTracking) {
       peek(requestNetwork_in, CPURequestMsg) {
@@ -2411,6 +2446,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition(BS_PM, ProbeAcksComplete, BS_M) {} {
+    cupf_conditionalUpdatePF;
     sf_setForwardReqTime;
     pt_popTriggerQueue;
   }
@@ -2421,6 +2457,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition(B_PM, ProbeAcksComplete, B_M){} {
+    cupf_conditionalUpdatePF;
     sf_setForwardReqTime;
     pt_popTriggerQueue;
   }
@@ -2445,6 +2482,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition(BS_Pm, ProbeAcksComplete, B){L3DataArrayWrite, L3TagArrayWrite} {
+    cupf_conditionalUpdatePF;
     sf_setForwardReqTime;
     wd_writeBackData;
     s_sendResponseS;
@@ -2463,6 +2501,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   transition(B_Pm, ProbeAcksComplete, B){L3DataArrayWrite, L3TagArrayWrite} {
+    cupf_conditionalUpdatePF;
     sf_setForwardReqTime;
     wd_writeBackData;
     es_sendResponseES;
