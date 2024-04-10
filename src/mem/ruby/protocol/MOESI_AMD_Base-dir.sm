@@ -1247,6 +1247,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       tbe.NumPendingAcks := 0;
       tbe.Dirty := false;
       tbe.Len := in_msg.Len;
+      tbe.TBEState := State:BDR_PM;
       if (in_msg.Type == DMARequestType:WRITE) {
         tbe.TBEState := State:BDW_PM;
         tbe.wtData := true;
@@ -1401,6 +1402,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         // for the masked-off data. If we received a probe with data, the mask
         // will be filled and the tbe data will fully overwrite the memory
         // data in the temp block.
+
+        // TODO FIXME: It is illegal to read from memory when line in PF is O!
         DataBlock tmpBlk := in_msg.DataBlk;
         tmpBlk.copyPartial(tbe.DataBlk, tbe.writeMask);
         tbe.DataBlk := tmpBlk;
@@ -1810,18 +1813,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         
   action(upf_updateProbeFilter, "upf", desc="") {
     if (ownerTracking || sharerTracking) {
+      assert(ProbeFilterMemory.isTagPresent(address));
+      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+      ProbeFilterState origState := entry.pfState;
+      DPRINTF(OPT5, "SHL [0x%x] Updating PF: origState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
       peek(requestNetwork_in, CPURequestMsg) {
-        assert(ProbeFilterMemory.isTagPresent(address));
-        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-        ProbeFilterState origState := entry.pfState;
-        DPRINTF(OPT5, "SHL [0x%x] Updating PF: origState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
         if (origState == ProbeFilterState:I) {
           if(    in_msg.Type == CoherenceRequestType:WriteThrough
               || in_msg.Type == CoherenceRequestType:Atomic
               || in_msg.Type == CoherenceRequestType:AtomicReturn
               || in_msg.Type == CoherenceRequestType:AtomicNoReturn
               || in_msg.Type == CoherenceRequestType:RdBlkM
-              || in_msg.Type == CoherenceRequestType:CtoD
+              // || in_msg.Type == CoherenceRequestType:CtoD
               ) {
             entry.pfState := ProbeFilterState:O;
             entry.Owner := tbe.OriginalRequestor;
@@ -1922,7 +1925,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
                 tbe.cupfOn := true;
               } else {
                 DPRINTF(OPT5, "Owner requested an RdBlk\n");
-                assert (false);
+                if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
+                  assert (false);
+                }
               }
             }
           }
@@ -1930,8 +1935,31 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           // TODO any missing cases?
           assert (false);
         }
-        DPRINTF(OPT5, "SHL [0x%x] Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
       }
+      DPRINTF(OPT5, "SHL [0x%x] Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
+    }
+  }
+
+  action(upfd_updateProbeFilterDMA, "upfd", desc="") {
+    if (ownerTracking || sharerTracking) {
+      assert(ProbeFilterMemory.isTagPresent(address));
+      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+      ProbeFilterState origState := entry.pfState;
+      DPRINTF(OPT5, "SHL [0x%x] Updating PF on DMA: Orig pfState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
+      peek(dmaRequestQueue_in, DMARequestMsg) {
+        if(origState == ProbeFilterState:S ||
+           origState == ProbeFilterState:O) {
+          if (in_msg.Type == DMARequestType:WRITE) {
+            entry.pfState := ProbeFilterState:I;
+            entry.Sharers.clear(); // gratuitous
+          } else if (in_msg.Type == DMARequestType:READ) {
+            // do nothing
+            // TODO: Illegal to read memory in this case!!
+            // see document
+          }
+        }
+      }
+      DPRINTF(OPT5, "SHL [0x%x] DMA: Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
     }
   }
 
@@ -2158,6 +2186,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     qdr_queueDmaRdReq;
     pr_profileL3HitMiss; //Must come after qdr_queueDmaRdReq
     scd_probeShrCoreDataForDma;
+    upfd_updateProbeFilterDMA;
     pd_popDmaRequestQueue;
   }
 
@@ -2178,6 +2207,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     qdr_queueDmaRdReq;
     pr_profileL3HitMiss; //Must come after qdr_queueDmaRdReq
     icd_probeInvCoreDataForDMA;
+    upfd_updateProbeFilterDMA;
     pd_popDmaRequestQueue;
   }
 
