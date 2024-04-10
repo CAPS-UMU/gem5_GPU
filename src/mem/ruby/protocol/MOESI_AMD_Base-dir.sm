@@ -211,6 +211,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     bool isSLCSet,      desc="Bypass GPU L1 and L2 Cache";
     Addr demandAddress,  desc="Address of demand request which caused probe filter eviction";
     bool cupfOn, desc="if you need to update PF conditionally (see cupf)";
+    bool doNotMerge, desc="It is illegal to merge memory read when in O state";
   }
 
   structure(TBETable, external="yes") {
@@ -1351,7 +1352,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
      */
     if (
           !noWBCleanVictimsToMem && (tbe.wtData || tbe.atomicData || (tbe.Dirty == false)) ||
-           noWBCleanVictimsToMem && (tbe.Dirty  || tbe.Dirty)
+           noWBCleanVictimsToMem && (tbe.wtData || tbe.atomicData || tbe.Dirty)
        ) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
@@ -1397,20 +1398,26 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(mt_writeMemDataToTBE, "mt", desc="write Mem data to TBE") {
     peek(memQueue_in, MemoryMsg) {
-      if (tbe.wtData == true) {
-        // Keep the write-through data based on mask, but use the memory block
-        // for the masked-off data. If we received a probe with data, the mask
-        // will be filled and the tbe data will fully overwrite the memory
-        // data in the temp block.
+      if(!tbe.doNotMerge) {
+        // TODO currently, we are still reading memory, but not merging it when illegal
+        // an efficient alternative is to never send a mem req to begin with
+        // but that involves state transition changes that are too intrusive
+        // so punt for now
+        if (tbe.wtData == true) {
+          // Keep the write-through data based on mask, but use the memory block
+          // for the masked-off data. If we received a probe with data, the mask
+          // will be filled and the tbe data will fully overwrite the memory
+          // data in the temp block.
 
-        // TODO FIXME: It is illegal to read from memory when line in PF is O!
-        DataBlock tmpBlk := in_msg.DataBlk;
-        tmpBlk.copyPartial(tbe.DataBlk, tbe.writeMask);
-        tbe.DataBlk := tmpBlk;
-      } else if (tbe.Dirty == false) {
-        tbe.DataBlk := in_msg.DataBlk; //in_msg here is from memQueue_in
+          // TODO FIXME: It is illegal to read from memory when line in PF is O!
+          DataBlock tmpBlk := in_msg.DataBlk;
+          tmpBlk.copyPartial(tbe.DataBlk, tbe.writeMask);
+          tbe.DataBlk := tmpBlk;
+        } else if (tbe.Dirty == false) {
+          tbe.DataBlk := in_msg.DataBlk; //in_msg here is from memQueue_in
+        }
+        tbe.MemData := true;
       }
-      tbe.MemData := true;
     }
   }
 
@@ -1881,6 +1888,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             }
           }
         } else if(origState == ProbeFilterState:O) {
+          // common action:
+          tbe.doNotMerge := true;
           if(    in_msg.Type == CoherenceRequestType:WriteThrough
               || in_msg.Type == CoherenceRequestType:Atomic
               || in_msg.Type == CoherenceRequestType:AtomicReturn
