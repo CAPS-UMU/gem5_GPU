@@ -1530,6 +1530,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             out_msg.CURequestor := tbe.CURequestor;
             DPRINTF(RubySlicc, "%s\n", out_msg);
           }
+          tbe.responded := true;
         } else if (tbe.TBEState == State:B_PM || tbe.TBEState == State:B_Pm) {
           DPRINTF(OPT1, "Early: Responding to RdBlk at %d probes\n", tbe.NumPendingAcks);
           enqueue(responseNetwork_out, ResponseMsg, response_latency) {
@@ -1562,7 +1563,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
           tbe.responded := true;
         }
-        tbe.responded := true;
       } else {
         //DPRINTF(OPT1, "Early prbResp NA for PF_Repl\n"); // usually for B_P (PF_Repl)
       }
