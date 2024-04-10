@@ -1355,12 +1355,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
        ) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
-      if(earlyDataToCore && !tbe.responded || !earlyDataToCore) { 
-        /* it is important to only do this when the requesting-core hasn't
-         * already been responded to so as not to repeat the operation twice
-         * which in some ATOMIC_RETURN cases could duplicate a log entry
-         * leading to problems when processing the response packets at the GPUColaescer
-         */
+      //if(earlyDataToCore && !tbe.responded || !earlyDataToCore) { 
+      //  /* it is important to only do this when the requesting-core hasn't
+      //   * already been responded to so as not to repeat the operation twice
+      //   * which in some ATOMIC_RETURN cases could duplicate a log entry
+      //   * leading to problems when processing the response packets at the GPUColaescer
+      //   */
         if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
           if (tbe.atomicDataReturn) {
             tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
@@ -1369,7 +1369,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, true);
           }
         }
-      }
+      //}
       // Skipping writing to memory blindly, a compulsorily following 
       // action (alwt) will determine if it's necessary to write back data.
       // Exception: DMA writes -- they do not write to L3, so memory writeback
@@ -1466,7 +1466,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         //      tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, true);
         //    }
         //  }
-
         //  if (tbe.wtData) {
         //    enqueue(triggerQueue_out, TriggerMsg, 1) {
         //      out_msg.addr := address;
