@@ -799,7 +799,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     peek(dmaRequestQueue_in, DMARequestMsg) {
       DPRINTF(OPT4, "DMA stuff really happens!\n");
       NetDest probe_dests;
-      bool noProbe = false;
+      bool noProbe := false;
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
       //  CPUonly && !GPUonly -> Add CorePairs

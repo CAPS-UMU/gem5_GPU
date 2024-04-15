@@ -351,8 +351,8 @@ class DirCache(RubyCache):
     def create(self, options, ruby_system, system):
         self.size = MemorySize(options.l3_size)
         self.size.value /= options.num_dirs
-        #self.assoc = options.l3_assoc
-        self.assoc = str(int(options.l3_assoc)*8) # for 6 L2 caches
+        self.assoc = options.l3_assoc
+        #self.assoc = str(int(options.l3_assoc)*8) # for 6 L2 caches
         self.dataArrayBanks /= options.num_dirs
         self.tagArrayBanks /= options.num_dirs
         self.dataArrayBanks /= options.num_dirs
@@ -461,6 +461,9 @@ def define_options(parser):
     )
     parser.add_argument(
         "--st", action="store_true", default=False, help="sharer tracking"
+    )
+    parser.add_argument(
+        "--num-sharers", type=int, default=4, help="number of sharers tracked in sharers-list"
     )
     parser.add_argument(
         "--ot", action="store_true", default=False, help="owner trakcing"
@@ -589,6 +592,7 @@ def construct_dirs(options, system, ruby_system, network):
         dir_cntrl.noWBCleanVictimsToLLC = options.ncvl # opt3_5
         dir_cntrl.ownerTracking = options.ot # opt4
         dir_cntrl.sharerTracking = options.st # opt5 (enhancement on opt4)
+        dir_cntrl.num_sharers = options.num_sharers # opt5 (enhancement on opt4)
         dir_cntrl.L2isWB = options.WB_L2
         # the number_of_TBEs is inclusive of TBEs below
 
