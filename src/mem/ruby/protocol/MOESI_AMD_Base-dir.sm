@@ -1029,7 +1029,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   }
 
   action(wd_writeBackData, "wd", desc="Write back data if needed") {
-    if (tbe.wtData || tbe.atomicData || tbe.Dirty == false) {
+    if (tbe.wtData || tbe.atomicData || tbe.Dirty) {
       // Only perform atomics in the directory if the SLC bit is set, or
       // if the L2 is WT
       if(!tbe.responded) {
