@@ -72,7 +72,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     BS_M, AccessPermission:Backing_Store,       desc="blocked waiting for memory";
     BM_M, AccessPermission:Backing_Store,       desc="blocked waiting for memory";
     B_M, AccessPermission:Backing_Store,        desc="blocked waiting for memory";
-    BP, AccessPermission:Backing_Store,         desc="blocked waiting for probes, no need for memory";
     BDR_PM, AccessPermission:Backing_Store,     desc="DMA read, blocked waiting for probes and memory";
     BDW_PM, AccessPermission:Backing_Store,     desc="DMA write, blocked waiting for probes and memory";
     BS_PM, AccessPermission:Backing_Store,      desc="blocked waiting for probes and Memory";
@@ -94,7 +93,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     RdBlkS,             desc="...";
     RdBlkM,             desc="...";
     RdBlk,              desc="...";
-    CtoD,               desc="...";
     WriteThrough,       desc="WriteThrough Message";
     Atomic,             desc="Atomic Message";
 
@@ -410,18 +408,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           trigger(Event:Atomic, in_msg.addr, entry, tbe);
         } else if (in_msg.Type == CoherenceRequestType:VicDirty) {
           if (getDirectoryEntry(in_msg.addr).VicDirtyIgnore.isElement(in_msg.Requestor)) {
-            DPRINTF(RubySlicc, "Dropping VicDirty for address %s\n", in_msg.addr);
+            DPRINTF(RubySlicc, "Dropping VicDirty for address 0x%x\n", in_msg.addr);
             trigger(Event:StaleVicDirty, in_msg.addr, entry, tbe);
           } else {
-            DPRINTF(RubySlicc, "Got VicDirty from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got VicDirty from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:VicDirty, in_msg.addr, entry, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:VicClean) {
           if (getDirectoryEntry(in_msg.addr).VicDirtyIgnore.isElement(in_msg.Requestor)) {
-            DPRINTF(RubySlicc, "Dropping VicClean for address %s\n", in_msg.addr);
+            DPRINTF(RubySlicc, "Dropping VicClean for address 0x%x\n", in_msg.addr);
             trigger(Event:StaleVicDirty, in_msg.addr, entry, tbe);
           } else {
-            DPRINTF(RubySlicc, "Got VicClean from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got VicClean from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:VicClean, in_msg.addr, entry, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:WriteFlush) {
@@ -548,25 +546,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         }
       }
     }
-  }
-
-  action(c_sendResponseCtoD, "c", desc="send CtoD Ack") {
-      enqueue(responseNetwork_out, ResponseMsg, response_latency) {
-        out_msg.addr := address;
-        out_msg.Type := CoherenceResponseType:NBSysResp;
-        out_msg.Sender := machineID;
-        out_msg.Destination.add(tbe.OriginalRequestor);
-        out_msg.MessageSize := MessageSizeType:Response_Control;
-        out_msg.Dirty := false;
-        out_msg.State := CoherenceState:Modified;
-        out_msg.CtoD := true;
-        out_msg.InitialRequestTime := tbe.InitialRequestTime;
-        out_msg.ForwardRequestTime := curCycle();
-        out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
-        out_msg.isGLCSet := tbe.isGLCSet;
-        out_msg.isSLCSet := tbe.isSLCSet;
-        DPRINTF(RubySlicc, "%s\n", out_msg);
-      }
   }
 
   action(w_sendResponseWBAck, "w", desc="send WB Ack") {
@@ -910,63 +889,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
-  action(ic_probeInvCore, "ic", desc="probe invalidate core, no return data needed") {
-    peek(requestNetwork_in, CPURequestMsg) { // not the right network?
-      NetDest probe_dests;
-      // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
-      //  CPUonly &&  GPUonly -> Invalid
-      //  CPUonly && !GPUonly -> Add CorePairs
-      // !CPUonly &&  GPUonly -> Add TCCs or TCC dirs
-      // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
-      if (CPUonly) {
-        assert(!GPUonly);
-        probe_dests.broadcast(MachineType:CorePair);
-      } else {
-        // CPU + GPU system
-        if (!GPUonly) {
-          probe_dests.broadcast(MachineType:CorePair);
-        }
-
-        // CPU + GPU or GPU only system
-        if (noTCCdir) {
-          probe_dests.add(mapAddressToRange(address, MachineType:TCC,
-                                            TCC_select_low_bit,
-                                            TCC_select_num_bits));
-        } else {
-          probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
-                                            TCC_select_low_bit,
-                                            TCC_select_num_bits));
-        }
-      }
-      probe_dests.remove(in_msg.Requestor);
-
-      if (probe_dests.count() > 0) {
-        enqueue(probeNetwork_out, NBProbeRequestMsg, response_latency) {
-          out_msg.addr := address;
-          out_msg.Type := ProbeRequestType:PrbInv;
-          out_msg.ReturnData := false;
-          out_msg.MessageSize := MessageSizeType:Control;
-          out_msg.Destination := probe_dests;
-          out_msg.isGLCSet := in_msg.isGLCSet;
-          out_msg.isSLCSet := in_msg.isSLCSet;
-          tbe.NumPendingAcks := out_msg.Destination.count();
-          APPEND_TRANSITION_COMMENT(" ic: Acks remaining: ");
-          APPEND_TRANSITION_COMMENT(tbe.NumPendingAcks);
-          DPRINTF(RubySlicc, "%s\n", out_msg);
-          tbe.ProbeRequestStartTime := curCycle();
-          assert(out_msg.Destination.count() > 0);
-        }
-      }
-
-      if (probe_dests.count() == 0) {
-        enqueue(triggerQueue_out, TriggerMsg, 1) {
-          out_msg.addr := address;
-          out_msg.Type := TriggerType:AcksComplete;
-        }
-      }
-    }
-  }
-
   action(d_writeDataToMemory, "d", desc="Write data to memory") {
     peek(responseNetwork_in, ResponseMsg) {
       enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
@@ -1129,7 +1051,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         } else if (tbe.Dirty) {
           if(tbe.atomicData == false && tbe.wtData == false) {
             assert(tbe.atomicDataReturn == false && tbe.atomicDataNoReturn == false);
-            DPRINTF(RubySlicc, "Got double data for %s from %s\n", address, in_msg.Sender);
+            DPRINTF(RubySlicc, "Got double data for 0x%x from %s\n", address, in_msg.Sender);
             assert(tbe.DataBlk == in_msg.DataBlk);  // in case of double data
           }
         } else {
@@ -1318,18 +1240,18 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   */
 
   // TRANSITIONS
-  transition({BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, {RdBlkS, RdBlkM, RdBlk, CtoD}) {
+  transition({BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, {RdBlkS, RdBlkM, RdBlk}) {
       st_stallAndWaitRequest;
   }
 
   // It may be possible to save multiple invalidations here!
-  transition({BL, BS_M, BM_M, B_M, BP, BS_PM, BM_PM, B_PM, BS_Pm, BM_Pm, B_Pm, B}, {Atomic, WriteThrough}) {
+  transition({BL, BS_M, BM_M, B_M, BS_PM, BM_PM, B_PM, BS_Pm, BM_Pm, B_Pm, B}, {Atomic, WriteThrough}) {
       st_stallAndWaitRequest;
   }
 
   // The exit state is always going to be U, so wakeUpDependents logic should be covered in all the
   // transitions which are flowing into U.
-  transition({BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, {DmaRead,DmaWrite}){
+  transition({BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, {DmaRead,DmaWrite}){
     sd_stallAndWaitRequest;
   }
 
@@ -1391,12 +1313,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     p_popRequestQueue;
   }
 
-  transition(U, CtoD, BP) {L3TagArrayRead} {
-    t_allocateTBE;
-    ic_probeInvCore;
-    p_popRequestQueue;
-  }
-
   transition(U, VicDirty, BL) {L3TagArrayRead} {
     t_allocateTBE;
     w_sendResponseWBAck;
@@ -1428,15 +1344,15 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     pr_popResponseQueue;
   }
 
-  transition({B, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm}, {VicDirty, VicClean}) {
+  transition({B, BDR_M, BDW_M, BS_M, BM_M, B_M, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm}, {VicDirty, VicClean}) {
     st_stallAndWaitRequest;
   }
 
-  transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, WBAck) {
+  transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, WBAck) {
     pm_popMemQueue;
   }
 
-  transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BP, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, StaleVicDirty) {
+  transition({U, BL, BDR_M, BDW_M, BS_M, BM_M, B_M, BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, B}, StaleVicDirty) {
     rv_removeVicDirtyIgnore;
     w_sendResponseWBAck;
     p_popRequestQueue;
@@ -1565,7 +1481,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     ptl_popTriggerQueue;
   }
 
-  transition({BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm, BP}, CPUPrbResp) {
+  transition({BDR_PM, BDW_PM, BS_PM, BM_PM, B_PM, BDR_Pm, BDW_Pm, BS_Pm, BM_Pm, B_Pm}, CPUPrbResp) {
     y_writeProbeDataToTBE;
     x_decrementAcks;
     o_checkForCompletion;
@@ -1636,15 +1552,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     sf_setForwardReqTime;
     wd_writeBackData;
     es_sendResponseES;
-    alwt_allocateL3BlockOnWT;
-    dt_deallocateTBE;
-    pt_popTriggerQueue;
-  }
-
-  transition(BP, ProbeAcksComplete, B){L3TagArrayWrite, L3TagArrayWrite} {
-    sf_setForwardReqTime;
-    wd_writeBackData;
-    c_sendResponseCtoD;
     alwt_allocateL3BlockOnWT;
     dt_deallocateTBE;
     pt_popTriggerQueue;
