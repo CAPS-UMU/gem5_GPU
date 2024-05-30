@@ -144,6 +144,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
   structure(CacheEntry, desc="...", interface="AbstractCacheEntry") {
     DataBlock DataBlk,          desc="data for the block";
     MachineID LastSender,       desc="Mach which this block came from";
+    bool Dirty,                 desc="dirty bit to alleviate excessive clean-victim writebacks";
   }
 
   structure(TBE, desc="...") {
@@ -165,6 +166,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     // Note, protocol invariant: atomicData = atomicDataReturn || atomicDataNoReturn;
     bool atomicDataReturn, desc="Got Atomic op and need return value?",default="false";
     bool atomicDataNoReturn, desc="Got Atomic op and don't need return value?",default="false";
+    bool dmaWr, desc="Got DMA write",default="false";
     Cycles InitialRequestTime, desc="...";
     Cycles ForwardRequestTime, desc="...";
     Cycles ProbeRequestStartTime, desc="...";
@@ -428,7 +430,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             trigger(Event:VicClean, in_msg.addr, entry, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:WriteFlush) {
-            DPRINTF(RubySlicc, "Got Flush from %s on %s\n", in_msg.Requestor, in_msg.addr);
+            DPRINTF(RubySlicc, "Got Flush from %s on 0x%x\n", in_msg.Requestor, in_msg.addr);
             trigger(Event:Flush, in_msg.addr, entry, tbe);
         } else {
           error("Bad request message type");
@@ -951,6 +953,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       tbe.Dirty := false;
       tbe.Len := in_msg.Len;
       if (in_msg.Type == DMARequestType:WRITE) {
+        tbe.dmaWr := true;
         tbe.wtData := true;
         tbe.Dirty := true;
         tbe.DataBlk := in_msg.DataBlk;
@@ -1039,6 +1042,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       // if the L2 is WT
       if(!tbe.responded) {
         if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
+          DPRINTF(OPT3, "AtomicPartial on 0x%x\n", address);
           if (tbe.atomicDataReturn) {
             tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
           } else {
@@ -1047,14 +1051,36 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           }
         }
       }
-      enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-        out_msg.addr := address;
-        out_msg.Type := MemoryRequestType:MEMORY_WB;
-        out_msg.Sender := machineID;
-        out_msg.MessageSize := MessageSizeType:Writeback_Data;
-        out_msg.DataBlk := tbe.DataBlk;
-        DPRINTF(ProtocolTrace, "%s\n", out_msg);
+      // skipping writing to memory directly
+      // the only cases where this action applies are:
+      //   WT, atomic, tbe.Dirty (DMA write / dirty probe-return)
+      //     dirty PR only from O or M
+      //       Trying: we could instead attempt to write to LLC here, and if it misses
+      //             write directly only to memory?
+      //     DMA writeadoesn't write to LLC, need to write to mem!
+      // alwt_ only writes WT, atomic to LLC, not DMA writes
+      bool llc_hit := L3CacheMemory.isTagPresent(address);
+      if(tbe.dmaWr || !llc_hit) {
+        enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+          out_msg.addr := address;
+          out_msg.Type := MemoryRequestType:MEMORY_WB;
+          out_msg.Sender := machineID;
+          out_msg.MessageSize := MessageSizeType:Writeback_Data;
+          out_msg.DataBlk := tbe.DataBlk;
+          DPRINTF(ProtocolTrace, "%s\n", out_msg);
+        }
+      } else if(llc_hit) {
+        CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
+        entry.Dirty := true;
+        entry.LastSender := tbe.LastSender;
+
+        DataBlock tmpBlk := tbe.DataBlk;
+        tmpBlk.clearAtomicLogEntries();
+        entry.DataBlk := tmpBlk;
+        // otherwise the log will be carried over to future requests reading from LLC
+        DPRINTF(OPT3, "Saved memory write on dirty probe\n");
       }
+
     }
   }
 
@@ -1173,6 +1199,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             // so now, we replicate it here for the early path
             // and elide it in the non-early path if it has already been applied
             if (tbe.atomicData && (tbe.isSLCSet || !L2isWB)) {
+              DPRINTF(OPT3, "AtomicPartial on 0x%x\n", address);
               if (tbe.atomicDataReturn) {
                 tbe.DataBlk.atomicPartial(tbe.DataBlk, tbe.writeMask, false);
               } else {
@@ -1259,6 +1286,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
           entry.DataBlk := in_msg.DataBlk;
           entry.LastSender := in_msg.Sender;
+          // entry.Dirty is guarnateed to be dirty now
+          entry.Dirty := true;
+          // otherwise, this action won't be performed, entry.dirty unchanged
           assert(is_valid(tbe));
           //The controller always allocates a TBE entry upon receipt of a request from L2 caches.
           //L3Hit flag is used by the hit profiling action pr_profileL3HitMiss to determine hit or miss.
@@ -1269,12 +1299,17 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             Addr victim := L3CacheMemory.cacheProbe(address);
             CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                    L3CacheMemory.lookup(victim));
-            enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-              out_msg.addr := victim;
-              out_msg.Type := MemoryRequestType:MEMORY_WB;
-              out_msg.Sender := machineID;
-              out_msg.MessageSize := MessageSizeType:Writeback_Data;
-              out_msg.DataBlk := victim_entry.DataBlk;
+            if (victim_entry.Dirty) {
+              enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+                out_msg.addr := victim;
+                out_msg.Type := MemoryRequestType:MEMORY_WB;
+                out_msg.Sender := machineID;
+                out_msg.MessageSize := MessageSizeType:Writeback_Data;
+                out_msg.DataBlk := victim_entry.DataBlk;
+              }
+              DPRINTF(OPT3, "DirtyLLCVictimWritten\n");
+            } else {
+              DPRINTF(OPT3, "CleanLLCVictimIgnored\n");
             }
             L3CacheMemory.deallocate(victim);
           }
@@ -1284,6 +1319,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           entry.DataBlk := in_msg.DataBlk;
 
           entry.LastSender := in_msg.Sender;
+          entry.Dirty := true;
         }
       } else {
         DPRINTF(OPT2, "CleanVictimNotToLLC\n");
@@ -1297,19 +1333,27 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       if (L3CacheMemory.isTagPresent(address)) {
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.lookup(address));
         APPEND_TRANSITION_COMMENT(" al wrote data to L3 (hit) ");
-        entry.DataBlk := tbe.DataBlk;
+
+        DataBlock tmpBlk := tbe.DataBlk;
+        tmpBlk.clearAtomicLogEntries();
+        entry.DataBlk := tmpBlk;
+        // otherwise log carries over to future requests reading from LLC
         entry.LastSender := tbe.LastSender;
       } else {
         if (L3CacheMemory.cacheAvail(address) == false) {
           Addr victim := L3CacheMemory.cacheProbe(address);
           CacheEntry victim_entry := static_cast(CacheEntry, "pointer",
                                                  L3CacheMemory.lookup(victim));
-          enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
-            out_msg.addr := victim;
-            out_msg.Type := MemoryRequestType:MEMORY_WB;
-            out_msg.Sender := machineID;
-            out_msg.MessageSize := MessageSizeType:Writeback_Data;
-            out_msg.DataBlk := victim_entry.DataBlk;
+          if(victim_entry.Dirty) {
+            enqueue(memQueue_out, MemoryMsg, to_memory_controller_latency) {
+              out_msg.addr := victim;
+              out_msg.Type := MemoryRequestType:MEMORY_WB;
+              out_msg.Sender := machineID;
+              out_msg.MessageSize := MessageSizeType:Writeback_Data;
+              out_msg.DataBlk := victim_entry.DataBlk;
+            }
+          } else {
+            DPRINTF(OPT3, "MemWrite saved\n");
           }
           L3CacheMemory.deallocate(victim);
         }
