@@ -1217,6 +1217,23 @@ machine(MachineType:CorePair, "CP-like Core Coherence")
     }
   }
 
+  action(pcd_sendProbeResponseCleanData, "pcd", desc="send probe ack, with clean data") {
+    enqueue(responseNetwork_out, ResponseMsg, issue_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:CPUPrbResp;
+      out_msg.Sender := machineID;
+      // will this always be ok? probably not for multisocket
+      out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
+      out_msg.DataBlk := cache_entry.DataBlk;
+      assert(cache_entry.Clean);
+      out_msg.Dirty := false;
+      out_msg.Hit := true;
+      out_msg.State := CoherenceState:NA;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
   action(pdm_sendProbeResponseDataMs, "pdm", desc="send probe ack, with data") {
     enqueue(responseNetwork_out, ResponseMsg, issue_latency) {
       assert(is_valid(cache_entry));
@@ -2489,7 +2506,17 @@ machine(MachineType:CorePair, "CP-like Core Coherence")
     pp_popProbeQueue;
   }
 
-  transition({Es, E0, E1, S, I}, PrbInvData, I) {L2TagArrayRead, L2TagArrayWrite} {
+  transition({Es, E0, E1}, PrbInvData, I) {L2TagArrayRead, L2TagArrayWrite} {
+    forward_eviction_to_cpu0;
+    forward_eviction_to_cpu1;
+    pcd_sendProbeResponseCleanData;
+    i2_invL2;
+    ib_invBothClusters;
+    ii_invIcache;  // only relevant for S
+    pp_popProbeQueue;
+  }
+
+  transition({S, I}, PrbInvData, I) {L2TagArrayRead, L2TagArrayWrite} {
     forward_eviction_to_cpu0;
     forward_eviction_to_cpu1;
     pi_sendProbeResponseInv;
