@@ -1226,7 +1226,7 @@ machine(MachineType:CorePair, "CP-like Core Coherence")
       // will this always be ok? probably not for multisocket
       out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
       out_msg.DataBlk := cache_entry.DataBlk;
-      assert(cache_entry.Clean);
+      assert(!cache_entry.Dirty);
       out_msg.Dirty := false;
       out_msg.Hit := true;
       out_msg.State := CoherenceState:NA;

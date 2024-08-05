@@ -1360,7 +1360,9 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         assert(L3CacheMemory.cacheAvail(address));
         CacheEntry entry := static_cast(CacheEntry, "pointer", L3CacheMemory.allocate(address, new CacheEntry));
         APPEND_TRANSITION_COMMENT(" al wrote data to L3 ");
-        entry.DataBlk := tbe.DataBlk;
+        DataBlock tmpBlk := tbe.DataBlk;
+        tmpBlk.clearAtomicLogEntries();
+        entry.DataBlk := tmpBlk;
         entry.LastSender := tbe.LastSender;
       }
     }
