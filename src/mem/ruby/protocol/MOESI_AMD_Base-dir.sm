@@ -211,7 +211,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     bool isSLCSet,      desc="Bypass GPU L1 and L2 Cache";
     Addr demandAddress,  desc="Address of demand request which caused probe filter eviction";
     bool cupfOn, desc="if you need to update PF conditionally (see cupf)";
-
+    bool doNotMerge, desc="It is illegal to merge memory read when in O state";
   }
 
   structure(TBETable, external="yes") {
@@ -550,7 +550,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
         out_msg.OriginalResponder := tbe.LastSender;
         out_msg.CURequestor := tbe.CURequestor;
-        out_msg.L3Hit := tbe.L3Hit;
+        out_msg.L3Hit := tbe.L3Hit; // not used in the destination
         DPRINTF(RubySlicc, "%s\n", out_msg);
       }
     }
@@ -582,7 +582,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         out_msg.ForwardRequestTime := tbe.ForwardRequestTime;
         out_msg.ProbeRequestStartTime := tbe.ProbeRequestStartTime;
         out_msg.OriginalResponder := tbe.LastSender;
-        out_msg.L3Hit := tbe.L3Hit;
+        out_msg.L3Hit := tbe.L3Hit; // unused in destination
         out_msg.isGLCSet := tbe.isGLCSet;
         out_msg.isSLCSet := tbe.isSLCSet;
         out_msg.CURequestor := tbe.CURequestor;
@@ -623,7 +623,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           if(tbe.atomicData){
             out_msg.CURequestor := tbe.CURequestor;
           }
-          out_msg.L3Hit := tbe.L3Hit;
+          out_msg.L3Hit := tbe.L3Hit; // unused in destination
           DPRINTF(RubySlicc, "%s\n", out_msg);
         }
         if (tbe.atomicData) {
@@ -799,19 +799,44 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     peek(dmaRequestQueue_in, DMARequestMsg) {
       DPRINTF(OPT4, "DMA stuff really happens!\n");
       NetDest probe_dests;
+      bool noProbe := false;
       // Add relevant machine types based on CPUonly, GPUonly and noTCCdir:
       //  CPUonly &&  GPUonly -> Invalid
       //  CPUonly && !GPUonly -> Add CorePairs
       // !CPUonly &&  GPUonly -> Add TCCs or TCC dirs
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
+      if (ownerTracking || sharerTracking) {
+        CacheEntry entry := static_cast(CacheEntry,
+            "pointer", ProbeFilterMemory.lookup(address));
+        noProbe := entry.pfState == ProbeFilterState:I;
+        if (sharerTracking && !noProbe) {
+          probe_dests := entry.Sharers;
+          // sharers list does not include owner
+          if(entry.pfState == ProbeFilterState:O) {
+            probe_dests.add(entry.Owner);
+          }
+          DPRINTF(OPT5, "SHL [0x%x] Caches to be invalidated: %s\n", address, probe_dests);
+        }
+      }
       if (CPUonly) {
         assert(!GPUonly);
-        probe_dests.broadcast(MachineType:CorePair);
-
+        if(!sharerTracking) {
+          if(!ownerTracking || ownerTracking && !noProbe) {
+            probe_dests.broadcast(MachineType:CorePair);
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
+          }
+        } // else: sharer tracking already has updated probe_dests above
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          probe_dests.broadcast(MachineType:CorePair);
+          if(!sharerTracking) {
+            if(!ownerTracking || ownerTracking && !noProbe) {
+              probe_dests.broadcast(MachineType:CorePair);
+            } else {
+              DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
+            }
+          } // else: sharer tracking already has updated probe_dests above
         }
 
         // CPU + GPU or GPU only system
@@ -866,7 +891,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           if(entry.pfState == ProbeFilterState:O) {
             probe_dests.add(entry.Owner);
           }
-          DPRINTF(OPT5, "SHL [0x%x] Sharers to be probed: %s\n", address, probe_dests);
+          DPRINTF(OPT5, "SHL [0x%x] Caches to be invalidated: %s\n", address, probe_dests);
         }
       }
 
@@ -961,21 +986,59 @@ machine(MachineType:Directory, "AMD Baseline protocol")
       //  CPUonly && !GPUonly -> Add CorePairs
       // !CPUonly &&  GPUonly -> Add TCCs or TCC dirs
       // !CPUonly && !GPUonly -> Add CorePairs and TCCs or TCC dirs
+      bool noProbe := false;
+      bool unicast := false;
+      MachineID owner;
+      if(ownerTracking || sharerTracking) {
+        CacheEntry entry := static_cast(CacheEntry,
+            "pointer", ProbeFilterMemory.lookup(address));
+        noProbe := entry.pfState == ProbeFilterState:I ||
+                   entry.pfState == ProbeFilterState:S;
+        // only restrict probe to owner instead of broadcast
+        unicast := entry.pfState == ProbeFilterState:O;
+        owner := entry.Owner;
+      }
       if (CPUonly) {
         assert(!GPUonly);
-        probe_dests.broadcast(MachineType:CorePair);
+        if (!ownerTracking) {
+          probe_dests.broadcast(MachineType:CorePair);
+        }
+        else if((ownerTracking || sharerTracking) && !noProbe) {
+          if(unicast) {
+            probe_dests.add(owner);
+          } else {
+            assert(false); // should not enter here
+          }
+        } else {
+          DPRINTF(OPT4, "Skipping probing CorePair because it does not have modified line\n");
+        }
       } else {
         // CPU + GPU system
         if (!GPUonly) {
-          probe_dests.broadcast(MachineType:CorePair);
+          if (!ownerTracking) {
+            probe_dests.broadcast(MachineType:CorePair);
+          }
+          else if((ownerTracking || sharerTracking) && !noProbe) {
+            if(unicast) {
+              DPRINTF(OPT4, "ProbeUnicast\n");
+              probe_dests.add(owner);
+            } else {
+              assert (false); // should not enter here
+            }
+          } else {
+            DPRINTF(OPT4, "Skipping probing CorePair because it does not have line\n");
+          }
         }
 
         // CPU + GPU or GPU only system
         // We don't need to notify TCC about reads
+        // this is conservative, might be able to elide probes here as well
         if (!noTCCdir) {
           probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
                                             TCC_select_low_bit,
                                             TCC_select_num_bits));
+        } else {
+          DPRINTF(OPT4, "Skipping probing GPU because we don't care to notify it\n");
         }
       }
       probe_dests.remove(in_msg.Requestor);
@@ -1015,9 +1078,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.lookup(address));
         noProbe := entry.pfState == ProbeFilterState:I ||
-                 entry.pfState == ProbeFilterState:S ||
-                   entry.pfState == ProbeFilterState:O && tbe.OriginalRequestor == entry.Owner && (entry.Sharers.count() == 0);
-
+                   entry.pfState == ProbeFilterState:S || 
+                   entry.pfState == ProbeFilterState:O && tbe.OriginalRequestor == entry.Owner && (entry.Sharers.isEmpty());
         // only restrict probe to owner instead of broadcast
         unicast := entry.pfState == ProbeFilterState:O;
         owner := entry.Owner;
@@ -1068,6 +1130,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
         // CPU + GPU or GPU only system
         // We don't need to notify TCC about reads
+        // this is conservative, might be able to elide probes here as well
         if (!noTCCdir) {
           if(!ownerTracking || (ownerTracking || sharerTracking) && !noProbe) {
             probe_dests.add(mapAddressToRange(address, MachineType:TCCdir,
@@ -1402,18 +1465,26 @@ machine(MachineType:Directory, "AMD Baseline protocol")
 
   action(mt_writeMemDataToTBE, "mt", desc="write Mem data to TBE") {
     peek(memQueue_in, MemoryMsg) {
-      if (tbe.wtData == true) {
-        // Keep the write-through data based on mask, but use the memory block
-        // for the masked-off data. If we received a probe with data, the mask
-        // will be filled and the tbe data will fully overwrite the memory
-        // data in the temp block.
-        DataBlock tmpBlk := in_msg.DataBlk;
-        tmpBlk.copyPartial(tbe.DataBlk, tbe.writeMask);
-        tbe.DataBlk := tmpBlk;
-      } else if (tbe.Dirty == false) {
-        tbe.DataBlk := in_msg.DataBlk; //in_msg here is from memQueue_in
+      if(!tbe.doNotMerge) {
+        // TODO currently, we are still reading memory, but not merging it when illegal
+        // an efficient alternative is to never send a mem req to begin with
+        // but that involves state transition changes that are too intrusive
+        // so punt for now
+        if (tbe.wtData == true) {
+          // Keep the write-through data based on mask, but use the memory block
+          // for the masked-off data. If we received a probe with data, the mask
+          // will be filled and the tbe data will fully overwrite the memory
+          // data in the temp block.
+
+          // TODO FIXME: It is illegal to read from memory when line in PF is O!
+          DataBlock tmpBlk := in_msg.DataBlk;
+          tmpBlk.copyPartial(tbe.DataBlk, tbe.writeMask);
+          tbe.DataBlk := tmpBlk;
+        } else if (tbe.Dirty == false) {
+          tbe.DataBlk := in_msg.DataBlk; //in_msg here is from memQueue_in
+        }
+        tbe.MemData := true;
       }
-      tbe.MemData := true;
     }
   }
 
@@ -1659,7 +1730,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             } else {
               // do not write-back, directly deallocate
               // since it's guaranteed memory has not diverged from L3
-              DPRINTF(OPT2, "MemWrite saved\n");
+              DPRINTF(OPT2, "MemWrite saved because LLC victim not dirty\n");
             }
             L3CacheMemory.deallocate(victim);
           }
@@ -1757,12 +1828,10 @@ machine(MachineType:Directory, "AMD Baseline protocol")
         CacheEntry entry := static_cast(CacheEntry, 
             "pointer", ProbeFilterMemory.allocate(address, new CacheEntry));
         APPEND_TRANSITION_COMMENT(" allocating a new probe filter entry since tag no match & cacheAvail ");
-        
         // will be updated on the return path of a line
         entry.pfState := ProbeFilterState:I;
-        assert(entry.Sharers.count() == 0);
+        assert(entry.Sharers.isEmpty());
         DPRINTF(OPT5, "SHL: [0x%x (victim/not)] Initialized sharersList\n", address);
-
       } else {
         /* TagMatch -- either for the victim during PF_Repl
          *   or for RdBlkX/WT/Atomic during original request
@@ -1792,29 +1861,6 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     ProbeFilterMemory.deallocate(address);
   }
 
-  action(upfd_updateProbeFilterDMA, "upfd", desc="") {
-    if (ownerTracking || sharerTracking) {
-      assert(ProbeFilterMemory.isTagPresent(address));
-      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-      ProbeFilterState origState := entry.pfState;
-      DPRINTF(OPT5, "SHL [0x%x] Updating PF on DMA: Orig pfState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
-      peek(dmaRequestQueue_in, DMARequestMsg) {
-        if(origState == ProbeFilterState:S ||
-           origState == ProbeFilterState:O) {
-          if (in_msg.Type == DMARequestType:WRITE) {
-            entry.pfState := ProbeFilterState:I;
-            entry.Sharers.clear(); // gratuitous
-          } else if (in_msg.Type == DMARequestType:READ) {
-            // do nothing
-            // TODO: Illegal to read memory in this case!!
-            // see document
-          }
-        }
-      }
-      DPRINTF(OPT5, "SHL [0x%x] DMA: Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
-    }
-  }
-
   action(cupf_conditionalUpdatePF, "cupf", desc="") {
     if (sharerTracking) {
       if(tbe.cupfOn) {
@@ -1838,12 +1884,14 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     }
   }
 
+        
   action(upf_updateProbeFilter, "upf", desc="") {
     if (ownerTracking || sharerTracking) {
+      assert(ProbeFilterMemory.isTagPresent(address));
+      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+      ProbeFilterState origState := entry.pfState;
+      DPRINTF(OPT5, "SHL [0x%x] Updating PF: origState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
       peek(requestNetwork_in, CPURequestMsg) {
-        assert(ProbeFilterMemory.isTagPresent(address));
-        CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
-        ProbeFilterState origState := entry.pfState;
         /*
         if(sharerTracking) {
           // TODO seems wrong to me
@@ -1897,14 +1945,13 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           assert (false);
         }
         */
-        DPRINTF(OPT5, "SHL [0x%x] Updating PF: origState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
         if (origState == ProbeFilterState:I) {
           if(    in_msg.Type == CoherenceRequestType:WriteThrough
               || in_msg.Type == CoherenceRequestType:Atomic
               || in_msg.Type == CoherenceRequestType:AtomicReturn
               || in_msg.Type == CoherenceRequestType:AtomicNoReturn
               || in_msg.Type == CoherenceRequestType:RdBlkM
-              || in_msg.Type == CoherenceRequestType:CtoD
+              // || in_msg.Type == CoherenceRequestType:CtoD
               ) {
             entry.pfState := ProbeFilterState:O;
             entry.Owner := tbe.OriginalRequestor;
@@ -1940,7 +1987,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
               entry.Sharers.add(tbe.OriginalRequestor);
             }
             // need to artificially intimate requestor that line came from another cache
-            // so it doesn't assume exclusivity when eliding probe when pfState S
+            // so it doesn't assume exclusivity when eliding probe when DirState S
             tbe.Cached := true;
           } else if(in_msg.Type == CoherenceRequestType:RdBlk) {
             // in the probe action, it will already be updated that the line was received from a cache
@@ -1961,6 +2008,8 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             }
           }
         } else if(origState == ProbeFilterState:O) {
+          // common action:
+          tbe.doNotMerge := true;
           if(    in_msg.Type == CoherenceRequestType:WriteThrough
               || in_msg.Type == CoherenceRequestType:Atomic
               || in_msg.Type == CoherenceRequestType:AtomicReturn
@@ -1994,11 +2043,11 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           } else if (in_msg.Type == CoherenceRequestType:RdBlk) {
             // a line in E or O state cannot send an RdBlk request
             // it can only send a RdBlkS if in E
-            //if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
-            //  // GPUs can silently relinquish ownership
-            //  DPRINTF(OPT5, "SHL [0x%x] entry.Owner = %s | tbe.OriginalRequestor = %s\n", address, entry.Owner, tbe.OriginalRequestor);
-            //  assert(entry.Owner != tbe.OriginalRequestor);
-            //}
+            if(machineIDToMachineType(in_msg.Requestor) == MachineType:CorePair) {
+              // GPUs can silently relinquish ownership
+              DPRINTF(OPT5, "SHL [0x%x] entry.Owner = %s | tbe.OriginalRequestor = %s\n", address, entry.Owner, tbe.OriginalRequestor);
+              assert(entry.Owner != tbe.OriginalRequestor);
+            }
             if(sharerTracking) {
               if(entry.Owner != tbe.OriginalRequestor) {
                 entry.Sharers.add(tbe.OriginalRequestor);
@@ -2015,13 +2064,37 @@ machine(MachineType:Directory, "AMD Baseline protocol")
           // TODO any missing cases?
           assert (false);
         }
-        DPRINTF(OPT5, "SHL [0x%x] Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
       }
+      DPRINTF(OPT5, "SHL [0x%x] Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
+    }
+  }
+
+  action(upfd_updateProbeFilterDMA, "upfd", desc="") {
+    if (ownerTracking || sharerTracking) {
+      assert(ProbeFilterMemory.isTagPresent(address));
+      CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
+      ProbeFilterState origState := entry.pfState;
+      DPRINTF(OPT5, "SHL [0x%x] Updating PF on DMA: Orig pfState:%s owner:%s sharerList:%s\n", address, origState, entry.Owner, entry.Sharers);
+      peek(dmaRequestQueue_in, DMARequestMsg) {
+        if(origState == ProbeFilterState:S ||
+           origState == ProbeFilterState:O) {
+          if (in_msg.Type == DMARequestType:WRITE) {
+            entry.pfState := ProbeFilterState:I;
+            entry.Sharers.clear(); // gratuitous
+          } else if (in_msg.Type == DMARequestType:READ) {
+            // do nothing
+            // TODO: Illegal to read memory in this case!!
+            // see document
+          }
+        }
+      }
+      DPRINTF(OPT5, "SHL [0x%x] DMA: Final pfState:%s owner:%s sharersList: %s\n", address, entry.pfState, entry.Owner, entry.Sharers);
     }
   }
 
   action(rmcd_removeSharerConditional, "rmcd", desc="remove sharer from probe Filter, conditional") {
     if(ownerTracking || sharerTracking) {
+      assert(ProbeFilterMemory.isTagPresent(address));
       if(sharerTracking) {
         // ensure the victimized line is infact supposed to have been tracked in the dir
         CacheEntry entry := static_cast(CacheEntry, "pointer", ProbeFilterMemory.lookup(address));
@@ -2036,12 +2109,12 @@ machine(MachineType:Directory, "AMD Baseline protocol")
             "pointer", ProbeFilterMemory.lookup(address));
         entry.Sharers.remove(in_msg.Requestor);
         DPRINTF(OPT5, "SHL [0x%x] L2 sharer removed; sharersList: %s\n", address, entry.Sharers);
-        if(entry.pfState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:VicDirty && entry.Sharers.count() != 0) {
+        if(entry.pfState == ProbeFilterState:O && in_msg.Type == CoherenceRequestType:VicDirty && !entry.Sharers.isEmpty()) {
           // owner is relinquishing dirty data
           entry.pfState := ProbeFilterState:S;
           DPRINTF(OPT5, "SHL Removed sole owner; pfState now S\n");
         }
-        if(entry.Sharers.count() == 0) {
+        if(entry.Sharers.isEmpty()) {
           ProbeFilterMemory.deallocate(address);
           DPRINTF(OPT5, "SHL Removed sole sharer; invalidated line\n");
         }
@@ -2242,7 +2315,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     qdr_queueDmaRdReq;
     pr_profileL3HitMiss; //Must come after qdr_queueDmaRdReq
     scd_probeShrCoreDataForDma;
-    upfd_updateProbeFilterDMA
+    upfd_updateProbeFilterDMA;
     pd_popDmaRequestQueue;
   }
 
@@ -2263,7 +2336,7 @@ machine(MachineType:Directory, "AMD Baseline protocol")
     qdr_queueDmaRdReq;
     pr_profileL3HitMiss; //Must come after qdr_queueDmaRdReq
     icd_probeInvCoreDataForDMA;
-    upfd_updateProbeFilterDMA
+    upfd_updateProbeFilterDMA;
     pd_popDmaRequestQueue;
   }
 
